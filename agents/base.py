@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Optional
 
 import anthropic
+import httpx
 
 
 # Track the MINIMUM remaining value we've seen across all concurrent calls so
@@ -194,9 +195,13 @@ class BaseAgent:
     model: str = MODEL_DEFAULT
 
     def __init__(self, client: Optional[anthropic.Anthropic] = None):
+        # Long read timeout: non-streaming opus calls legitimately run 10+ min.
+        # Short connect timeout: a host that won't even connect should fail in
+        # seconds, not eat the whole read budget. The SDK retries timeouts.
         self.client = client or anthropic.Anthropic(
             api_key=os.environ.get("ANTHROPIC_API_KEY"),
-            timeout=1800.0,
+            timeout=httpx.Timeout(connect=15.0, read=1800.0, write=120.0, pool=120.0),
+            max_retries=2,
         )
         self.skill_content = load_skill("practicality_mandate")
 
