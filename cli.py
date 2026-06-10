@@ -60,7 +60,25 @@ def _make_outline(title: str, summary: str, slide_count: int, max_words: int,
     }
 
 
-def _build_review_qa(outline: dict, work_dir: Path, style: str, qa_passes: int) -> str:
+def _require_plan(plan: dict) -> dict:
+    """Fail fast when a planner returned an error stub instead of a plan."""
+    if not plan.get("markdown"):
+        err = plan.get("_parse_error") or plan.get("error") or "planner returned an empty plan"
+        raise SystemExit(f"[deckgen] planning failed: {err}")
+    return plan
+
+
+def _watermark_info(args: argparse.Namespace) -> dict | None:
+    if not args.watermark:
+        return None
+    wm = Path(args.watermark)
+    if not wm.exists():
+        raise SystemExit(f"[deckgen] error: watermark image not found: {wm}")
+    return {"image_path": str(wm), "mode": args.watermark_mode}
+
+
+def _build_review_qa(outline: dict, work_dir: Path, style: str, qa_passes: int,
+                     watermark_info: dict | None = None) -> str:
     """Builder + fact-check + visual-QA loop. Returns path to the final .pptx."""
     from .agents import ReviewerAgent, VisualQAAgent
     from .tools import pptx_tool
@@ -74,7 +92,7 @@ def _build_review_qa(outline: dict, work_dir: Path, style: str, qa_passes: int) 
     OUTER_MAX = 2
     for cycle in range(1, OUTER_MAX + 1):
         _log(f"builder pass {cycle}/{OUTER_MAX}...")
-        pptx_path = builder.build(outline, str(work_dir), style, reviewer_feedback, None)
+        pptx_path = builder.build(outline, str(work_dir), style, reviewer_feedback, watermark_info)
         if not Path(pptx_path).exists() or not zipfile.is_zipfile(pptx_path):
             raise RuntimeError("builder produced a missing or corrupt .pptx")
         if cycle == OUTER_MAX:
@@ -109,9 +127,14 @@ def _build_review_qa(outline: dict, work_dir: Path, style: str, qa_passes: int) 
             ],
             "global_feedback": f"Visual QA cycle {qa_cycle}: {qa['defect_count']} visual defects found.",
         }
-        new_path = builder.build(outline, str(work_dir), style, qa_feedback, None)
+        new_path = builder.build(outline, str(work_dir), style, qa_feedback, watermark_info)
         if Path(new_path).exists() and zipfile.is_zipfile(new_path):
             pptx_path = new_path
+
+    if watermark_info:
+        from .tools.watermark import apply_watermark
+        _log(f"applying watermark ({watermark_info['mode']})...")
+        apply_watermark(pptx_path, watermark_info["image_path"], watermark_info["mode"])
 
     return pptx_path
 
@@ -128,7 +151,7 @@ def cmd_build(args: argparse.Namespace) -> int:
 
     _log(f"planning {args.slides} slides on {args.topic!r} (style={args.style})...")
     planner = SlidePlannerAgent()
-    slide_plan = planner.plan(outline, args.style, web_images=args.web_images)
+    slide_plan = _require_plan(planner.plan(outline, args.style, web_images=args.web_images))
 
     if args.web_images and slide_plan.get("image_urls"):
         from .tools.image_fetch import download_plan_images
@@ -140,7 +163,8 @@ def cmd_build(args: argparse.Namespace) -> int:
     outline["approved_slide_plan"] = slide_plan
     (work_dir / "outline.json").write_text(json.dumps(outline, indent=2))
 
-    pptx_path = _build_review_qa(outline, work_dir, args.style, args.qa_passes)
+    pptx_path = _build_review_qa(outline, work_dir, args.style, args.qa_passes,
+                                 _watermark_info(args))
     out = args.output or f"{_slugify(args.topic)}.pptx"
     shutil.copy2(pptx_path, out)
     _log(f"done → {out}")
@@ -171,8 +195,8 @@ def cmd_redesign(args: argparse.Namespace) -> int:
 
     _log(f"planning redesign (style={args.style})...")
     planner = RedesignPlannerAgent()
-    slide_plan = planner.plan(extracted, args.style, source_pngs,
-                              max_words_per_slide=args.max_words)
+    slide_plan = _require_plan(planner.plan(extracted, args.style, source_pngs,
+                                            max_words_per_slide=args.max_words))
 
     # Map embedded source images so the builder can re-place them
     web_images = {}
@@ -193,7 +217,8 @@ def cmd_redesign(args: argparse.Namespace) -> int:
     outline["approved_slide_plan"] = slide_plan
     (work_dir / "outline.json").write_text(json.dumps(outline, indent=2))
 
-    pptx_path = _build_review_qa(outline, work_dir, args.style, args.qa_passes)
+    pptx_path = _build_review_qa(outline, work_dir, args.style, args.qa_passes,
+                                 _watermark_info(args))
     out = args.output or f"{src.stem}_redesigned.pptx"
     shutil.copy2(pptx_path, out)
     _log(f"done → {out}")
@@ -202,13 +227,19 @@ def cmd_redesign(args: argparse.Namespace) -> int:
 
 def _add_shared_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--style", default="professional",
-                   help="palette preset name or custom palette JSON (default: professional)")
+                   help="palette preset name, custom palette JSON, or path to a "
+                        "palette .json file (default: professional)")
     p.add_argument("--max-words", type=int, default=20,
                    help="max words of on-slide text per slide (default: 20)")
     p.add_argument("--decorative", action="store_true",
                    help="add decorative background shapes (default: plain backgrounds)")
     p.add_argument("--qa-passes", type=int, default=3,
                    help="max visual QA passes (default: 3; requires LibreOffice)")
+    p.add_argument("--watermark", help="logo image to stamp on every slide")
+    p.add_argument("--watermark-mode", default="title_and_bottom_right",
+                   choices=["bottom_right", "title_and_bottom_right"],
+                   help="bottom-right corner on all slides, optionally centered "
+                        "at the top of the title slide too (default)")
     p.add_argument("-o", "--output", help="output .pptx path")
 
 
@@ -236,6 +267,11 @@ def main(argv: list[str] | None = None) -> int:
     r.set_defaults(func=cmd_redesign)
 
     args = parser.parse_args(argv)
+
+    # --style can be a preset name, inline palette JSON, or a path to a
+    # palette .json file (the CLI equivalent of the UI's saved palettes).
+    if args.style.endswith(".json") and Path(args.style).is_file():
+        args.style = Path(args.style).read_text().strip()
 
     if not os.environ.get("ANTHROPIC_API_KEY"):
         _log("error: ANTHROPIC_API_KEY is not set")

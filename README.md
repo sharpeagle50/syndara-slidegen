@@ -62,7 +62,8 @@ deckgen redesign old_deck.pptx --style coral_energy -o new_deck.pptx
 Useful flags: `--style <preset|JSON palette>` (see `tools/slide_layouts.py` for
 the ~20 presets), `--max-words N` (on-slide text budget), `--decorative`
 (background accent shapes; default is plain), `--web-images` (let the planner
-embed real images from the web), `--qa-passes N`.
+embed real images from the web), `--qa-passes N`, `--watermark logo.png`
+(stamp a logo bottom-right on every slide and centered on the title slide).
 
 ### Library
 
