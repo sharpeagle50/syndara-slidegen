@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "syndara-slidegen"
+version = "0.1.0"
+description = "AI pipeline that generates and redesigns PowerPoint decks — the slide engine behind Syndara"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+dependencies = [
+    "anthropic>=0.40",
+    "claude-agent-sdk>=0.1",
+    "python-pptx>=0.6",
+    "Pillow>=10",
+    "matplotlib>=3.7",
+    "numpy>=1.24",
+    "httpx>=0.27",
+]
+
+[project.optional-dependencies]
+# Extra diagram renderers (graphviz flowcharts, SVG rasterization).
+diagrams = ["graphviz", "cairosvg"]
+
+[project.urls]
+Homepage = "https://github.com/sharpeagle50/syndara-slidegen"
+
+# The repository root *is* the `deckgen` package (agents/ and tools/ are its
+# subpackages), so map the package name onto the root directory.
+[tool.setuptools]
+packages = ["deckgen", "deckgen.agents", "deckgen.tools"]
+
+[tool.setuptools.package-dir]
+deckgen = "."

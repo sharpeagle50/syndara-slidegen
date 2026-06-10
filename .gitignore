@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+
+# Node — the PptxGenJS renderer's deps live in tools/; run `npm install` there.
+node_modules/
+
+# Generated output (decks, rendered slides, intermediate PDFs)
+*.pptx
+*.pdf
+slide_*.png
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/

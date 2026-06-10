@@ -1,0 +1,221 @@
+"""Visual QA agent — inspects rendered slides for visual defects using Claude vision."""
+from __future__ import annotations
+import base64
+import json
+import traceback
+from pathlib import Path
+from typing import Optional
+
+
+QA_SYSTEM_PROMPT = """\
+You are a visual QA inspector for presentation slides. You receive rendered slide images and check for visual defects.
+
+Inspect each slide for these 12 categories of defects:
+
+1. **overlapping_elements** — text on text, text covering diagrams, elements stacked on each other
+2. **text_overflow** — text cut off at edges, extending past the visible slide area
+3. **insufficient_margins** — elements too close to slide edges (< 0.5 inch visually)
+4. **low_contrast** — text hard to read against its background color
+5. **layout_repetition** — consecutive slides with identical visual layout pattern (e.g., three bullet slides in a row)
+6. **placeholder_artifacts** — "Lorem ipsum", "[source]", "[insert X]", raw markdown syntax (**, ##, etc.), template placeholders left in
+7. **empty_slide** — slides with barely any content or completely blank
+8. **diagram_legibility** — diagram/chart labels too small, clipped, or unreadable
+9. **inconsistent_styling** — slides that don't match the expected color palette or font style
+10. **excessive_text** — slides with too many words visible (more than ~{max_words} words of on-slide text)
+11. **broken_connectors** — connecting lines in diagrams that don't actually reach their target shapes, protrude past them, overlap/cut through other shapes, or stop short. Lines should start at one shape edge and end at another — flag any that look disconnected, misrouted, or visually broken
+12. **misaligned_elements** — elements that visually appear intended to be aligned but aren't. Check: titles or centered text that's slightly off-center on the slide; icons or images that don't line up vertically with adjacent text; columns or grid items at inconsistent heights; rows of elements with uneven spacing. Only flag when the misalignment is clearly unintentional — deliberate asymmetric or staggered layouts are fine
+
+You will also be given the expected style palette (colors, fonts) so you can check for consistency.
+
+Respond with ONLY valid JSON (no markdown fences, no explanation) in this format:
+{
+  "slides": [
+    {
+      "slide_index": <1-based slide number matching the label>,
+      "issues": ["category_name", ...],
+      "description": "Human-readable description of what's wrong",
+      "suggestion": "Specific fix suggestion"
+    }
+  ]
+}
+
+Only include slides that have defects. If all slides look good, return: {"slides": []}
+Be strict but fair — flag real visual problems, not minor aesthetic preferences.
+"""
+
+BATCH_SIZE = 6
+
+
+class VisualQAAgent:
+    """Uses Claude Sonnet vision to inspect rendered slides for visual defects."""
+
+    model = "claude-sonnet-4-6"
+
+    def __init__(self):
+        from anthropic import Anthropic
+        self.client = Anthropic()
+
+    def inspect(self, pptx_path: str, style_palette: Optional[dict] = None,
+                only_indices: Optional[list[int]] = None,
+                revision_feedback: str = "",
+                max_words_per_slide: int = 20) -> dict:
+        """Inspect slides of a PPTX for visual defects.
+
+        Args:
+            only_indices: If provided, only inspect these 0-based slide indices.
+            revision_feedback: If set, only check whether this revision was addressed.
+
+        Returns:
+            {
+                "status": "pass" | "fail" | "error",
+                "defect_count": int,
+                "slides": [
+                    {
+                        "slide_index": int,  # 0-based
+                        "issues": [str],     # issue category names
+                        "description": str,  # human-readable description
+                        "suggestion": str,   # specific fix suggestion
+                    }
+                ]
+            }
+        """
+        try:
+            return self._inspect_inner(pptx_path, style_palette, only_indices, revision_feedback, max_words_per_slide)
+        except Exception as e:
+            traceback.print_exc()
+            print(f"[VisualQA] ERROR: inspection failed — {e}", flush=True)
+            return {"status": "error", "defect_count": 0, "slides": [], "error": str(e)}
+
+    def _inspect_inner(self, pptx_path: str, style_palette: Optional[dict] = None,
+                        only_indices: Optional[list[int]] = None,
+                        revision_feedback: str = "",
+                        max_words_per_slide: int = 20) -> dict:
+        """Core inspection logic, may raise."""
+        from ..tools.qa_render import render_all_slides
+        from .base import _retry_api_call
+
+        jpegs = render_all_slides(pptx_path)
+        if not jpegs:
+            return {"status": "pass", "defect_count": 0, "slides": []}
+
+        # Clean up the temp render directory after we're done reading files
+        _qa_render_dir = str(Path(jpegs[0]).parent) if jpegs else None
+
+        # Filter to only requested indices if specified
+        indexed_jpegs = list(enumerate(jpegs))
+        if only_indices is not None:
+            target = set(only_indices)
+            indexed_jpegs = [(i, j) for i, j in indexed_jpegs if i in target]
+            if not indexed_jpegs:
+                if _qa_render_dir:
+                    import shutil
+                    shutil.rmtree(_qa_render_dir, ignore_errors=True)
+                return {"status": "pass", "defect_count": 0, "slides": []}
+
+        # Batch slides into groups of BATCH_SIZE
+        batches: list[list[tuple[int, str]]] = []
+        current_batch: list[tuple[int, str]] = []
+        for i, jpeg_path in indexed_jpegs:
+            current_batch.append((i, jpeg_path))
+            if len(current_batch) >= BATCH_SIZE:
+                batches.append(current_batch)
+                current_batch = []
+        if current_batch:
+            batches.append(current_batch)
+
+        all_defects: list[dict] = []
+
+        palette_str = ""
+        if style_palette:
+            palette_str = f"\n\nExpected style palette:\n{json.dumps(style_palette, indent=2)}"
+
+        for batch in batches:
+            content_blocks: list[dict] = []
+            for slide_num, jpeg_path in batch:
+                # Label for the slide
+                content_blocks.append({
+                    "type": "text",
+                    "text": f"Slide {slide_num + 1}:",
+                })
+                # Base64-encode the JPEG
+                jpeg_bytes = Path(jpeg_path).read_bytes()
+                b64_data = base64.standard_b64encode(jpeg_bytes).decode()
+                content_blocks.append({
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": "image/jpeg",
+                        "data": b64_data,
+                    },
+                })
+
+            # Add palette info at the end
+            if palette_str:
+                content_blocks.append({
+                    "type": "text",
+                    "text": palette_str,
+                })
+
+            try:
+                system_prompt = QA_SYSTEM_PROMPT.replace("{max_words}", str(max_words_per_slide))
+                if revision_feedback:
+                    system_prompt = (
+                        "You are a visual QA inspector for presentation slides. "
+                        "A creator requested a specific revision. Check ONLY whether "
+                        "the revised slide(s) visually reflect the requested change. "
+                        "Do NOT flag unrelated issues or suggest additional improvements.\n\n"
+                        f"CREATOR'S REVISION REQUEST:\n\"{revision_feedback}\"\n\n"
+                        "Respond with ONLY valid JSON (no markdown fences) in this format:\n"
+                        '{\n  "slides": [\n    {\n'
+                        '      "slide_index": <1-based slide number>,\n'
+                        '      "issues": ["revision_not_applied"],\n'
+                        '      "description": "What specifically was not addressed",\n'
+                        '      "suggestion": "How to fix it"\n'
+                        "    }\n  ]\n}\n\n"
+                        'If the revision was correctly applied, return: {"slides": []}'
+                    )
+                raw = _retry_api_call(
+                    lambda: self.client.messages.with_raw_response.create(
+                        model=self.model,
+                        max_tokens=2048,
+                        system=system_prompt,
+                        messages=[{
+                            "role": "user",
+                            "content": content_blocks,
+                        }],
+                    ),
+                    label="VisualQA",
+                    model=self.model,
+                )
+                response = raw.parse()
+                raw_text = response.content[0].text.strip()
+                # Parse JSON from the response
+                batch_result = json.loads(raw_text)
+                for slide_defect in batch_result.get("slides", []):
+                    # Convert 1-based slide_index from Haiku to 0-based
+                    slide_idx = slide_defect.get("slide_index", 1) - 1
+                    all_defects.append({
+                        "slide_index": slide_idx,
+                        "issues": slide_defect.get("issues", []),
+                        "description": slide_defect.get("description", ""),
+                        "suggestion": slide_defect.get("suggestion", ""),
+                    })
+            except (json.JSONDecodeError, KeyError, IndexError) as parse_err:
+                slide_nums = [s + 1 for s, _ in batch]
+                print(
+                    f"[VisualQA] JSON parse failed for slides {slide_nums}: {parse_err}. "
+                    f"Raw response: {raw_text[:500] if 'raw_text' in dir() else '(unavailable)'}",
+                    flush=True,
+                )
+                continue
+
+        if _qa_render_dir:
+            import shutil
+            shutil.rmtree(_qa_render_dir, ignore_errors=True)
+
+        defect_count = len(all_defects)
+        return {
+            "status": "fail" if defect_count > 0 else "pass",
+            "defect_count": defect_count,
+            "slides": all_defects,
+        }
