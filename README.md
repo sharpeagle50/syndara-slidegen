@@ -28,20 +28,34 @@ icon rendering (react-icons).
 
 ## Requirements
 
-- **Python 3.10+**
-- **Node.js 18+** — the PptxGenJS renderer and icon rendering run in a Node
-  subprocess. Install its deps once: `cd tools && npm install`.
-- **LibreOffice** — used to rasterize slides for rendering and visual QA. The
-  `soffice` binary must be on your `PATH` (visual QA degrades gracefully if it
-  is absent, but slide-image rendering requires it).
-- **An Anthropic API key** — set `ANTHROPIC_API_KEY` in your environment.
+**Core (needed for any deck build):**
+
+| Requirement | Used for |
+|---|---|
+| Python 3.10+ | everything (`pip install -e .` pulls the Python deps) |
+| `ANTHROPIC_API_KEY` env var | all agents |
+| Node.js 18+ | the PptxGenJS deck renderer and icon rendering (`cd tools && npm install` once) |
+| `claude` CLI ([Claude Code](https://docs.anthropic.com/en/docs/claude-code), `npm i -g @anthropic-ai/claude-code`) | the default slide builder (drives PptxGenJS agentically). Without it the CLI falls back to the layout-library builder automatically |
+
+**Per-feature (degrade gracefully when absent — the related visual is skipped
+or the stage is bypassed with a warning):**
+
+| Requirement | Used for |
+|---|---|
+| LibreOffice (`soffice` on PATH) | rendering slides to images: visual QA, redesign's visual analysis, the builder's `render_slide` self-check |
+| poppler (`pdftoppm` on PATH) | the PDF→image step of slide rendering (pairs with LibreOffice) |
+| `d2` CLI | auto-routed architecture/flow diagrams |
+| `mmdc` (`npm i -g @mermaid-js/mermaid-cli`, needs Chromium) | sequence/ER/state diagrams |
+| `pip install -e ".[diagrams]"` (graphviz + cairosvg) | legacy graphviz flowchart fallback |
 
 ## Install
 
 ```bash
-pip install -e .            # installs the `deckgen` package + Python deps
-cd tools && npm install     # PptxGenJS + react-icons (Node renderer)
-# install LibreOffice via your OS package manager (brew install --cask libreoffice, etc.)
+pip install -e .                         # the deckgen package + Python deps
+cd tools && npm install && cd ..         # PptxGenJS + react-icons (Node renderer)
+npm install -g @anthropic-ai/claude-code @mermaid-js/mermaid-cli   # default builder + mermaid
+brew install --cask libreoffice          # or your OS package manager
+brew install poppler d2                  # slide rendering + d2 diagrams
 ```
 
 ## Usage
