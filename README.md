@@ -1,5 +1,7 @@
 # syndara-slidegen
 
+[![CI](https://github.com/sharpeagle50/syndara-slidegen/actions/workflows/ci.yml/badge.svg)](https://github.com/sharpeagle50/syndara-slidegen/actions/workflows/ci.yml)
+
 An AI pipeline that **generates and redesigns PowerPoint decks** — the slide
 engine behind [Syndara](https://github.com/sharpeagle50). Give it a topic (or an
 existing `.pptx`), and it researches, plans slide-by-slide, builds a real
@@ -44,26 +46,46 @@ cd tools && npm install     # PptxGenJS + react-icons (Node renderer)
 
 ## Usage
 
+### CLI
+
+```bash
+# Generate a deck from a topic (researches the web, plans, builds, QAs):
+deckgen build "Intro to Vector Databases" --slides 12 --style midnight -o deck.pptx
+
+# Ground it in your own material:
+deckgen build "Q3 Sales Onboarding" --context-file notes.md --style professional
+
+# Redesign an existing deck (same content, better design):
+deckgen redesign old_deck.pptx --style coral_energy -o new_deck.pptx
+```
+
+Useful flags: `--style <preset|JSON palette>` (see `tools/slide_layouts.py` for
+the ~20 presets), `--max-words N` (on-slide text budget), `--decorative`
+(background accent shapes; default is plain), `--web-images` (let the planner
+embed real images from the web), `--qa-passes N`.
+
+### Library
+
 ```python
 from deckgen.agents import SlidePlannerAgent, ClaudeCodeSlideBuilder
 
-# 1. Plan a deck from a topic/outline
-planner = SlidePlannerAgent()
-plan = planner.plan(
-    outline={"title": "Intro to Vector Databases", "summary": "...", "slide_count": 12},
-    style="midnight",
-)
+outline = {
+    "module_id": "vector-db-m1", "module_position": 1,
+    "title": "Intro to Vector Databases", "summary": "",
+    "subtopics": [], "outcomes": [], "slides": [],
+    "slide_count": 12, "max_words_per_slide": 20, "plain_backgrounds": True,
+}
+plan = SlidePlannerAgent().plan(outline, style="midnight")
 
-# 2. Build the .pptx from the plan
-builder = ClaudeCodeSlideBuilder()
-# ... drive the builder with the plan to produce slides.pptx
+outline["approved_slide_plan"] = plan
+pptx_path = ClaudeCodeSlideBuilder().build(outline, "./out", "midnight")
 ```
+
+`cli.py` is the reference orchestration (plan → build → review → visual QA);
+read it to see how the agents compose.
 
 The model can be overridden with the `SYNDARA_MODEL` environment variable
 (default: a current Claude model). See `agents/base.py`.
-
-> **Note:** a turnkey CLI (`deckgen build "topic"` / `deckgen redesign in.pptx`)
-> is in progress. For now the agents are used as a library, as above.
 
 ## Contributing
 

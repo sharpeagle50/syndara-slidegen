@@ -23,6 +23,9 @@ dependencies = [
 # Extra diagram renderers (graphviz flowcharts, SVG rasterization).
 diagrams = ["graphviz", "cairosvg"]
 
+[project.scripts]
+deckgen = "deckgen.cli:main"
+
 [project.urls]
 Homepage = "https://github.com/sharpeagle50/syndara-slidegen"
 
@@ -33,3 +36,8 @@ packages = ["deckgen", "deckgen.agents", "deckgen.tools"]
 
 [tool.setuptools.package-dir]
 deckgen = "."
+
+# The Node renderer (pptxgen_runner.js + npm manifests) ships inside the
+# package — PptxGenSession resolves these relative to __file__.
+[tool.setuptools.package-data]
+"deckgen.tools" = ["*.js", "package.json", "package-lock.json"]

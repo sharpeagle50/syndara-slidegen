@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install package
+        run: pip install .
+      - name: Import smoke test
+        run: |
+          python -c "
+          from deckgen.agents import (
+              BaseAgent, SlidePlannerAgent, ClaudeCodeSlideBuilder,
+              AgenticSlideBuilder, ReviewerAgent, VisualQAAgent,
+              RedesignPlannerAgent, DiagramGenAgent,
+          )
+          from deckgen.tools import pptx_tool, code_exec_tool, pptxgen_tool
+          from deckgen.tools.slide_layouts import get_palette, LAYOUTS, add_slide
+          from deckgen.tools.image_fetch import download_plan_images
+          from deckgen.tools.qa_render import render_all_slides
+          from deckgen.tools.render_tool import render_matplotlib_chart
+          assert len(LAYOUTS) >= 9
+          assert len(get_palette('midnight')) >= 8
+          print('imports OK')
+          "
+      - name: CLI smoke test
+        run: |
+          deckgen --help
+          deckgen build --help
+          deckgen redesign --help
+      - name: Compile all sources
+        run: python -m compileall -q agents tools cli.py __init__.py
+
+  node:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Install renderer deps (validates lockfile)
+        working-directory: tools
+        run: npm ci
+      - name: Renderer deps load
+        working-directory: tools
+        run: node -e "require('pptxgenjs'); require('react'); require('react-dom/server'); require('react-icons/fa'); require('sharp'); console.log('node deps OK')"
