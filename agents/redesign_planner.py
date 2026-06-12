@@ -35,8 +35,9 @@ ABSOLUTE RULES:
    narration based on the on-slide text. Either way, produce polished
    output suitable for audio playback.
    EXCEPTION — references/citations slides: notes must be ONE short
-   sign-off sentence acknowledging the end of the deck. Never read URLs,
-   citations, or source names aloud.
+   sign-off sentence like "These are the references used in this module —
+   thank you for listening!". Never read URLs, citations, or source names
+   aloud.
 4. IMPROVE VISUAL LAYOUTS. This is your primary job. For each slide:
    - Choose the best layout type from the palette
    - Decide if the content would be better presented as a chart, table,
