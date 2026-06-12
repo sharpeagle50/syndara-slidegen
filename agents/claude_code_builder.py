@@ -527,6 +527,13 @@ async def build_slides_with_claude_code(
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     pptx_path = str(output_dir / "slides.pptx")
+
+    # Scale the tool budget with deck size: observed usage is ~2-2.5 turns per
+    # slide (compose + chart/icon renders + self-check renders). A fixed budget
+    # silently truncates large decks.
+    target_slides = outline.get("slide_count") or len(outline.get("slides") or []) or 0
+    if target_slides:
+        max_turns = max(max_turns, int(target_slides * 2.5) + 30)
     outline_path = str(output_dir / "outline.json")
     images_dir = output_dir / "images"
     images_dir.mkdir(exist_ok=True)
