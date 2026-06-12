@@ -237,6 +237,10 @@ LAYOUT PALETTE (pick the best fit per slide)
 
 HEURISTICS
 - Open with title_slide. Close with summary_slide. Don't pad.
+- If you include a references/citations slide at the end, its speaker notes
+  must be ONE short sign-off sentence (e.g. "And that brings us to the end of
+  this module — the sources are on screen if you'd like to dig deeper.").
+  NEVER read URLs, citations, or source names aloud in the narration.
 - Vary layouts — don't let every middle slide be bullet_slide.
 - Match the target slide count given in the prompt. The count is approximate
   — being off by 10–20% is fine, but don't overshoot or undershoot heavily.

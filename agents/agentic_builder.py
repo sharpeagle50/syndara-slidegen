@@ -81,6 +81,9 @@ RULES:
   adapt the speaker notes to match — remove references to deleted content,
   update changed details. Only modify notes that are affected by the feedback;
   leave unaffected notes verbatim.
+  EXCEPTION — references/citations slides: speaker_notes must be ONE short
+  sign-off sentence acknowledging the end of the deck. Never read URLs,
+  citations, or source names aloud.
 - Text should be short: max {max_words_per_slide} words total on a slide. No single item longer
   than 6 words. Callouts max 15 words. No walls of text.
 - NEVER use emoji characters (🔒 🔍 💡 ⚡ etc.) in any text field — they render

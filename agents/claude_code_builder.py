@@ -61,6 +61,10 @@ YOUR JOB, in order:
      slide.addNotes() VERBATIM. Do NOT paste any of the speaker notes
      onto the slide surface. The narration is the teaching; the slide is
      the visual anchor.
+   - EXCEPTION — references/citations slides: notes must be ONE short
+     sign-off sentence acknowledging the end of the deck (e.g. "That's the
+     end of this module — these sources are here if you want to go
+     deeper."). Never read URLs, citations, or source names aloud.
    When in doubt: delete text from the slide. Add a diagram instead.
    The speaker notes carry the content; the slide carries the visual.
 2. Compose the slide deck by calling run_pptxgen_code with PptxGenJS
