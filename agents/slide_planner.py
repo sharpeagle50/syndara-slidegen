@@ -10,6 +10,7 @@ The output is plain markdown — no JSON schema gymnastics. The downstream
 Builder reads it as authoritative content guidance.
 """
 from __future__ import annotations
+import re
 import time
 
 from .base import BaseAgent
@@ -242,9 +243,9 @@ HEURISTICS
   this module — thank you for listening!". NEVER read URLs, citations, or
   source names aloud in the narration.
 - Vary layouts — don't let every middle slide be bullet_slide.
-- Match the target slide count given in the prompt. The count is approximate
-  — being off by 10–20% is fine, but don't overshoot or undershoot heavily.
-  More focused slides are better than fewer overloaded ones.
+- The prompt gives a slide-count RANGE. Use however many slides within that
+  range best fit the material — but never go below the minimum or above the
+  maximum. More focused slides are better than fewer overloaded ones.
 - Put comprehension questions only where they genuinely check understanding,
   at most twice per module. Mark them with **Layout:** `question_slide`.
   For question slides, use this structure:
@@ -255,6 +256,20 @@ HEURISTICS
   and one showing the same content with the correct answer revealed. This
   creates a click-to-reveal animation in the downloadable PPTX.
 """
+
+
+def slide_range_for(target: int) -> tuple[int, int]:
+    """Map a target slide count to its deck-length band.
+
+    Decks come in three creator-facing lengths; the planner has discretion
+    WITHIN the band but must never leave it:
+      short  1–20 · medium 20–40 · long 40–60
+    """
+    if target <= 20:
+        return (1, 20)
+    if target <= 40:
+        return (20, 40)
+    return (40, 60)
 
 
 class SlidePlannerAgent(BaseAgent):
@@ -293,6 +308,7 @@ class SlidePlannerAgent(BaseAgent):
         max_words_per_slide = outline.get("max_words_per_slide") or 20
         explicit_target = outline.get("slide_count")
         target_slides = explicit_target or max(outline_slide_count, 40)
+        slide_lo, slide_hi = slide_range_for(target_slides)
         from datetime import date
         today = date.today().strftime("%B %d, %Y")
         user_msg = f"""Today's date is {today}. Use this to calibrate your research —
@@ -313,8 +329,10 @@ prior outline — you start from the title and summary above. Research the
 topic thoroughly, then design the slide-by-slide plan based on what you
 find.
 
-Target roughly {target_slides} content slides. Open with a title_slide
-and close with a summary_slide.
+DECK LENGTH: plan between {slide_lo} and {slide_hi} slides (inclusive).
+You have full discretion WITHIN that range — use however many slides best
+fit the material — but NEVER go outside it. Open with a title_slide and
+close with a summary_slide.
 
 CRITICAL — FOLLOW THE OUTPUT FORMAT EXACTLY:
 Every slide MUST have ALL of these sections in this exact order:
@@ -434,6 +452,47 @@ depict and the builder will create a suitable alternative diagram.
 
         if not md or len(md) < 100:
             return self._error_stub(mod_pos, "planner returned empty or near-empty markdown", md)
+
+        # Enforce the deck-length band: one corrective retry if the plan
+        # landed outside it, then accept whatever we have (warn, don't fail).
+        planned = len(re.findall(r"^##\s+Slide\s+\d+", md, re.MULTILINE))
+        if planned and not (slide_lo <= planned <= slide_hi) and isinstance(msgs, list):
+            print(
+                f"[SlidePlannerAgent] plan has {planned} slides — outside the "
+                f"{slide_lo}–{slide_hi} band, requesting correction",
+                flush=True,
+            )
+            fix_msg = (
+                f"Your plan has {planned} slides, but it must have between "
+                f"{slide_lo} and {slide_hi} slides (inclusive). "
+                f"{'Trim or merge slides' if planned > slide_hi else 'Expand the material with additional slides'} "
+                f"to fit the range, then output the COMPLETE corrected plan in the same format. "
+                f"Do not do any new web research."
+            )
+            try:
+                fixed_text, _ = self.run_tool_loop(
+                    messages=msgs + [{"role": "user", "content": fix_msg}],
+                    tools=tools,
+                    tool_handlers={},
+                    max_tokens=128000,
+                    trace_label=f"SlidePlanner.module{mod_pos}.bandfix",
+                )
+                fixed_md = (fixed_text or "").strip()
+                if fixed_md.startswith("```") and fixed_md.endswith("```"):
+                    fixed_md = fixed_md.split("\n", 1)[1] if "\n" in fixed_md else fixed_md
+                    fixed_md = fixed_md.rsplit("```", 1)[0].rstrip()
+                fixed_count = len(re.findall(r"^##\s+Slide\s+\d+", fixed_md, re.MULTILINE))
+                if fixed_count and len(fixed_md) >= 100:
+                    md = fixed_md
+                    planned = fixed_count
+            except Exception as e:
+                print(f"[SlidePlannerAgent] band correction failed ({e}) — keeping original plan", flush=True)
+            if not (slide_lo <= planned <= slide_hi):
+                print(
+                    f"[SlidePlannerAgent] ⚠ plan still has {planned} slides "
+                    f"(band {slide_lo}–{slide_hi}) — proceeding anyway",
+                    flush=True,
+                )
 
         sources = self._extract_sources(md)
         image_urls = SlidePlannerAgent._extract_image_urls(md) if web_images else []
