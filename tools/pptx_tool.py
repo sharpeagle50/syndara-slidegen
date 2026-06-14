@@ -195,6 +195,56 @@ def update_speaker_notes(pptx_path: str, slide_idx: int, notes: str) -> str:
     return pptx_path
 
 
+def _strip_zip_dir_entries(raw: bytes, _depth: int = 0) -> tuple[bytes, bool]:
+    """Rewrite an OOXML package (zip) without OPC-violating directory entries,
+    recursing into embedded OOXML parts. Returns (bytes, changed).
+
+    PptxGenJS builds chart data workbooks with JSZip, which emits zero-byte
+    'folder' entries (names ending in '/'). The OPC spec forbids directory
+    parts, and they carry no content-type, so PowerPoint's strict parser
+    flags the file as damaged and 'repairs' it (silently dropping the chart).
+    python-pptx and LibreOffice are lenient and never surface this.
+    """
+    import io
+    import zipfile
+
+    src = zipfile.ZipFile(io.BytesIO(raw))
+    changed = False
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as dst:
+        for info in src.infolist():
+            if info.filename.endswith("/"):
+                changed = True  # drop directory entry
+                continue
+            data = src.read(info.filename)
+            if _depth < 3 and info.filename.lower().endswith((".xlsx", ".docx", ".pptx")):
+                data, sub_changed = _strip_zip_dir_entries(data, _depth + 1)
+                changed = changed or sub_changed
+            zi = zipfile.ZipInfo(info.filename, date_time=info.date_time)
+            zi.compress_type = info.compress_type
+            dst.writestr(zi, data)
+    return (out.getvalue() if changed else raw), changed
+
+
+def sanitize_pptx(pptx_path: str) -> bool:
+    """Strip OPC-violating directory entries from a .pptx and its embedded
+    workbooks, in place. Fixes the spurious 'PowerPoint found a problem with
+    content / repaired and removed it' dialog on charts. Returns True if the
+    file was modified. Safe and idempotent — a clean file is left untouched.
+    """
+    try:
+        with open(pptx_path, "rb") as f:
+            raw = f.read()
+        cleaned, changed = _strip_zip_dir_entries(raw)
+        if changed:
+            with open(pptx_path, "wb") as f:
+                f.write(cleaned)
+        return changed
+    except Exception as e:
+        print(f"[sanitize_pptx] skipped ({type(e).__name__}: {e})", flush=True)
+        return False
+
+
 def extract_slide_pngs(pptx_path: str, output_dir: str) -> list[str]:
     """
     Extract each slide as a PNG image.

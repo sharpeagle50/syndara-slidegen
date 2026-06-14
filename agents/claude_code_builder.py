@@ -1112,6 +1112,15 @@ bullets is WRONG. You MUST generate the visual. This is non-negotiable.
             f"Final message: {(final_result or '')[:400]}"
         )
 
+    # Strip OPC-violating directory entries that PptxGenJS/JSZip leaves in the
+    # chart data workbooks — otherwise PowerPoint shows a 'repair' dialog.
+    try:
+        from ..tools.pptx_tool import sanitize_pptx
+        if sanitize_pptx(pptx_path):
+            print(f"[{_label}] sanitized OOXML (removed JSZip directory entries)", flush=True)
+    except Exception as _e:
+        print(f"[{_label}] sanitize step skipped: {_e}", flush=True)
+
     # Post-build validation: check that slides have images
     try:
         from pptx import Presentation as _Prs
