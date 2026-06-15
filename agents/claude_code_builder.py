@@ -587,12 +587,31 @@ async def build_slides_with_claude_code(
             )
         global_fb = (reviewer_feedback or {}).get("global_feedback", "") or ""
 
+        # When structural edits are allowed, keep the deck inside its length band.
+        band_rule = ""
+        if allow_structural and target_slides:
+            from .slide_planner import slide_range_for
+            _lo, _hi = slide_range_for(target_slides)
+            _cur = None
+            try:
+                from pptx import Presentation as _Prs
+                _cur = len(_Prs(pptx_path).slides)
+            except Exception:
+                pass
+            band_rule = (
+                f" DECK LENGTH BOUND: the deck must stay between {_lo} and {_hi} slides"
+                + (f" (it currently has {_cur})" if _cur is not None else "")
+                + f". You may add or delete as requested, but the final deck must "
+                f"NOT have fewer than {_lo} or more than {_hi} slides — if a request "
+                f"would cross that bound, make the edit in place instead of adding/removing."
+            )
         structural_rule = (
             "STRUCTURAL CHANGES ALLOWED: You may delete or add slides as indicated "
             "by the [ACTION: DELETE] or [ACTION: ADD_AFTER] flags above. For DELETE: "
             "remove the slide entirely via `xml_slides = prs.slides._sldIdLst; "
             "xml_slides.remove(xml_slides[index])`. For ADD_AFTER: add a new slide "
             "after the indicated index. Adjust carefully — deletions shift indices."
+            + band_rule
             if allow_structural else
             "Do NOT add or remove slides. Do NOT re-order slides. Only edit content in place."
         )
