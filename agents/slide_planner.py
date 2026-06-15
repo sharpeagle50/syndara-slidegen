@@ -516,7 +516,9 @@ depict and the builder will create a suitable alternative diagram.
         # Enforce the in-slide question cap: one corrective retry if the plan
         # exceeds max_questions (matters most for max_questions=0 → none).
         def _count_questions(text: str) -> int:
-            return len(re.findall(r"\*\*Layout:\*\*\s*`?question_slide`?", text, re.IGNORECASE))
+            # Anchored to the Layout marker (won't match prose), but tolerant of
+            # the colon, an em/en-dash separator, backticks, and spacing.
+            return len(re.findall(r"\*\*Layout:?\*\*\s*[—–-]?\s*`?\s*question_slide", text, re.IGNORECASE))
         q_count = _count_questions(md)
         if q_count > max_questions and isinstance(msgs, list):
             print(
