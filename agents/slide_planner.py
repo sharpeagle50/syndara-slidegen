@@ -290,8 +290,12 @@ class SlidePlannerAgent(BaseAgent):
         feedback: str = "",
         assessment_questions: list[dict] | None = None,
         web_images: bool = False,
+        max_questions: int = 2,
     ) -> dict:
-        """Return a slide-by-slide content plan (markdown) for the given outline."""
+        """Return a slide-by-slide content plan (markdown) for the given outline.
+
+        max_questions caps in-slide comprehension question_slides (0 = none).
+        """
         self._apply_max_words(outline.get("max_words_per_slide") or 20)
         import json as _j
         is_revise = bool(previous_plan and feedback)
@@ -309,6 +313,19 @@ class SlidePlannerAgent(BaseAgent):
         explicit_target = outline.get("slide_count")
         target_slides = explicit_target or max(outline_slide_count, 40)
         slide_lo, slide_hi = slide_range_for(target_slides)
+        max_questions = max(0, int(max_questions))
+        if max_questions <= 0:
+            questions_directive = (
+                "IN-SLIDE QUESTIONS: Do NOT include any comprehension/question "
+                "slides. Never use **Layout:** `question_slide`."
+            )
+        else:
+            questions_directive = (
+                f"IN-SLIDE QUESTIONS: Include AT MOST {max_questions} comprehension "
+                f"question slide(s) — only where they genuinely check understanding, "
+                f"never as filler. Fewer is fine. Mark each with **Layout:** "
+                f"`question_slide`."
+            )
         from datetime import date
         today = date.today().strftime("%B %d, %Y")
         user_msg = f"""Today's date is {today}. Use this to calibrate your research —
@@ -333,6 +350,8 @@ DECK LENGTH: plan between {slide_lo} and {slide_hi} slides (inclusive).
 You have full discretion WITHIN that range — use however many slides best
 fit the material — but NEVER go outside it. Open with a title_slide and
 close with a summary_slide.
+
+{questions_directive}
 
 CRITICAL — FOLLOW THE OUTPUT FORMAT EXACTLY:
 Every slide MUST have ALL of these sections in this exact order:
@@ -491,6 +510,49 @@ depict and the builder will create a suitable alternative diagram.
                 print(
                     f"[SlidePlannerAgent] ⚠ plan still has {planned} slides "
                     f"(band {slide_lo}–{slide_hi}) — proceeding anyway",
+                    flush=True,
+                )
+
+        # Enforce the in-slide question cap: one corrective retry if the plan
+        # exceeds max_questions (matters most for max_questions=0 → none).
+        def _count_questions(text: str) -> int:
+            return len(re.findall(r"\*\*Layout:\*\*\s*`?question_slide`?", text, re.IGNORECASE))
+        q_count = _count_questions(md)
+        if q_count > max_questions and isinstance(msgs, list):
+            print(
+                f"[SlidePlannerAgent] plan has {q_count} question slide(s) — over "
+                f"the cap of {max_questions}, requesting correction",
+                flush=True,
+            )
+            limit_txt = ("Remove ALL question_slide slides — this deck must have none."
+                         if max_questions == 0 else
+                         f"Keep at most {max_questions} question_slide slide(s); convert or remove the rest.")
+            qfix = (
+                f"Your plan has {q_count} question_slide slides, which exceeds the limit. "
+                f"{limit_txt} Output the COMPLETE corrected plan in the same format. "
+                f"Do not do any new web research."
+            )
+            try:
+                qtext, _ = self.run_tool_loop(
+                    messages=msgs + [{"role": "user", "content": qfix}],
+                    tools=tools,
+                    tool_handlers={},
+                    max_tokens=128000,
+                    trace_label=f"SlidePlanner.module{mod_pos}.qfix",
+                )
+                qmd = (qtext or "").strip()
+                if qmd.startswith("```") and qmd.endswith("```"):
+                    qmd = qmd.split("\n", 1)[1] if "\n" in qmd else qmd
+                    qmd = qmd.rsplit("```", 1)[0].rstrip()
+                if len(qmd) >= 100 and _count_questions(qmd) <= q_count:
+                    md = qmd
+            except Exception as e:
+                print(f"[SlidePlannerAgent] question-cap correction failed ({e}) — keeping plan", flush=True)
+            final_q = _count_questions(md)
+            if final_q > max_questions:
+                print(
+                    f"[SlidePlannerAgent] ⚠ plan still has {final_q} question slide(s) "
+                    f"(cap {max_questions}) — proceeding anyway",
                     flush=True,
                 )
 

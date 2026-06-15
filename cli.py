@@ -151,7 +151,8 @@ def cmd_build(args: argparse.Namespace) -> int:
 
     _log(f"planning {args.slides} slides on {args.topic!r} (style={args.style})...")
     planner = SlidePlannerAgent()
-    slide_plan = _require_plan(planner.plan(outline, args.style, web_images=args.web_images))
+    slide_plan = _require_plan(planner.plan(outline, args.style, web_images=args.web_images,
+                                            max_questions=args.questions))
 
     if args.web_images and slide_plan.get("image_urls"):
         from .tools.image_fetch import download_plan_images
@@ -255,6 +256,8 @@ def main(argv: list[str] | None = None) -> int:
     b.add_argument("--context", default="", help="extra context to ground the content")
     b.add_argument("--context-file", help="file whose text is appended to the context")
     b.add_argument("--slides", type=int, default=15, help="target slide count (default: 15)")
+    b.add_argument("--questions", type=int, default=2,
+                   help="max in-slide comprehension questions (0 = none; default: 2)")
     b.add_argument("--web-images", action="store_true",
                    help="let the planner pick real web images and embed them")
     _add_shared_args(b)
