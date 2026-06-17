@@ -102,6 +102,49 @@ read it to see how the agents compose.
 The model can be overridden with the `SYNDARA_MODEL` environment variable
 (default: a current Claude model). See `agents/base.py`.
 
+## Review checkpoints (human-in-the-loop)
+
+Each stage is a separate call, so *you* decide when to pause between them — the
+engine is stateless and holds no opinion about review, so a checkpoint is just
+"run the next stage only after your own function returns." This is exactly how
+the hosted [Syndara](https://github.com/sharpeagle50) product layers human
+approval on top of the engine; you can build the same thing in a few lines.
+
+```python
+from deckgen.agents import SlidePlannerAgent, ClaudeCodeSlideBuilder
+
+# 1. Plan
+plan = SlidePlannerAgent().plan(outline, style="midnight")
+
+# 2. Checkpoint — review/edit the plan before a single slide is built.
+#    plan["markdown"] is the human-readable plan: show it, let someone edit it,
+#    and hand it back. Return it unchanged to approve, or raise to abort.
+plan = review_plan(plan)
+
+# 3. Build from the (possibly edited) plan
+outline["approved_slide_plan"] = plan
+pptx = ClaudeCodeSlideBuilder().build(outline, "./out", "midnight")
+
+# 4. Checkpoint — review the built deck. To request changes, feed structured
+#    feedback into another build pass (the same shape ReviewerAgent returns):
+feedback = review_deck(pptx)   # e.g. {"slides": [{"slide_index": 2, "status": "revise",
+                               #        "suggestion": "..."}], "global_feedback": "..."}
+if feedback:
+    pptx = ClaudeCodeSlideBuilder().build(outline, "./out", "midnight", feedback)
+```
+
+When the feedback flags specific slides, the builder **edits the existing
+`.pptx` in place** and leaves every other slide untouched (it only rebuilds from
+scratch for sweeping, deck-wide changes) — so a targeted review pass is cheap
+and non-destructive. If you'd rather apply edits directly than re-run the
+builder, `tools/pptx_tool.py` exposes the low-level primitives
+(`update_speaker_notes`, `extract_text_content`, `sanitize_pptx`, slide
+rendering) the same review flow is built on.
+
+Persisting these checkpoints (a database, a web UI, resuming after a restart) is
+deliberately out of scope for the engine — that's application concern. The
+engine just gives you clean seams to pause at.
+
 ## Contributing
 
 Contributions are accepted under the MIT license (inbound = outbound): by
