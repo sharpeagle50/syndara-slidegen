@@ -129,7 +129,7 @@ Produce the JSON verdict only. No commentary outside the JSON."""
                 messages=messages,
                 tools=tools,
                 tool_handlers={},
-                max_tokens=4000,
+                max_tokens=24000,
             )
         except Exception:
             response = self.call(messages, max_tokens=4000)
