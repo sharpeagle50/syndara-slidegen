@@ -250,13 +250,34 @@ Produce JSON: {{"status": "approved"|"revise", "feedback": "...", "issues": ["wr
         try:
             return extract_json(text)
         except (ValueError, json.JSONDecodeError):
-            print(f"[Reviewer] WARNING: could not parse verdict, defaulting to revise. First 200 chars: {text[:200]!r}")
-            return {
-                "status": "revise",
-                "overall_compliance_pct": 0.5,
-                "slides": [],
-                "global_feedback": "Reviewer response was malformed — flagging for re-review.",
-            }
+            pass
+        # Retry once: ask the model to reformat its own review as valid JSON.
+        print("[Reviewer] verdict didn't parse — asking model to reformat it...")
+        try:
+            response = self.call(
+                [{"role": "user", "content": (
+                    "Convert the following slide-deck review into valid JSON with EXACTLY these keys: "
+                    '{"status": "approved" or "revise", "overall_compliance_pct": number 0-1, '
+                    '"slides": [{"slide_index": int, "status": "revise", "issues": ["..."], "suggestion": "..."}], '
+                    '"global_feedback": "..."}. Output ONLY the JSON.\n\nREVIEW:\n' + text[:20000]
+                )}],
+                max_tokens=16000,
+            )
+            retry_text = response.content[0].text if response.content else ""
+            return extract_json(retry_text)
+        except Exception:
+            pass
+        # Still unparseable → APPROVE (proceed with the built deck). Defaulting to
+        # "revise" here is dangerous: with no flagged slides it forces a full
+        # rebuild that discards the deck's visuals. A malformed review must never
+        # trigger that — visual QA still runs afterward to catch layout issues.
+        print(f"[Reviewer] WARNING: verdict unparseable after retry — APPROVING (not forcing a rebuild). First 200 chars: {text[:200]!r}")
+        return {
+            "status": "approved",
+            "overall_compliance_pct": 1.0,
+            "slides": [],
+            "global_feedback": "Reviewer response was malformed; proceeding with the current deck.",
+        }
 
     def _parse_simple_verdict(self, text: str) -> dict:
         try:

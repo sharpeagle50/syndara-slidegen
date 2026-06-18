@@ -100,6 +100,11 @@ def _build_review_qa(outline: dict, work_dir: Path, style: str, qa_passes: int,
         slide_content = pptx_tool.extract_text_content(pptx_path)
         verdict = reviewer.review_slides(slide_content, cycle)
         _log(f"reviewer: {verdict.get('status', 'approved')}")
+        if verdict.get("status", "approved") != "approved":
+            _flagged = [s.get("slide_index") for s in (verdict.get("slides") or []) if s.get("status") == "revise"]
+            _log(f"  reviewer flagged slides {_flagged or '(none — global feedback → full rebuild)'}")
+            if verdict.get("global_feedback"):
+                _log(f"  reviewer note: {str(verdict['global_feedback'])[:200]}")
         if verdict.get("status", "approved") == "approved":
             break
         reviewer_feedback = verdict
@@ -116,6 +121,9 @@ def _build_review_qa(outline: dict, work_dir: Path, style: str, qa_passes: int,
             _log(f"visual QA unavailable ({e}); skipping — install LibreOffice to enable it")
             break
         _log(f"visual QA pass {qa_cycle}: {qa['status']}, {qa['defect_count']} defects")
+        for s in (qa.get("slides") or []):
+            _issues = ", ".join(s.get("issues") or []) if isinstance(s.get("issues"), list) else (s.get("issues") or "")
+            _log(f"  QA slide {s.get('slide_index')}: {(s.get('description') or _issues or '')[:140]}")
         if qa["status"] in ("pass", "error") or qa["defect_count"] == 0 or qa_cycle == qa_passes:
             break
         qa_feedback = {
