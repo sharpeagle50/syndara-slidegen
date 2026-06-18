@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import socket
 import time as _time
 import threading
 from pathlib import Path
@@ -10,6 +11,35 @@ from typing import Optional
 
 import anthropic
 import httpx
+
+
+def _keepalive_socket_options() -> list[tuple]:
+    """TCP keepalive options so a long-idle connection (e.g. the ~4-5 min the
+    planner waits on a single non-streaming call) isn't silently dropped by a
+    router/NAT/Wi-Fi idle timeout. Probes keep the connection — and the NAT
+    mapping — alive; if the network is genuinely dead, the probes fail in a few
+    minutes so the call errors fast (and our retry reconnects) instead of
+    hanging to the read timeout. Cross-platform: TCP_KEEPIDLE on Linux,
+    TCP_KEEPALIVE on macOS."""
+    opts: list[tuple] = [(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)]
+    idle_opt = getattr(socket, "TCP_KEEPIDLE", None)
+    if idle_opt is None:
+        idle_opt = getattr(socket, "TCP_KEEPALIVE", None)  # macOS name
+    if idle_opt is not None:
+        opts.append((socket.IPPROTO_TCP, idle_opt, 60))   # first probe after 60s idle
+    if hasattr(socket, "TCP_KEEPINTVL"):
+        opts.append((socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 30))  # then every 30s
+    if hasattr(socket, "TCP_KEEPCNT"):
+        opts.append((socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 5))     # 5 misses → drop
+    return opts
+
+
+def _build_http_client() -> httpx.Client:
+    """httpx client with TCP keepalive enabled on every connection."""
+    return httpx.Client(
+        timeout=httpx.Timeout(connect=15.0, read=1800.0, write=120.0, pool=120.0),
+        transport=httpx.HTTPTransport(socket_options=_keepalive_socket_options()),
+    )
 
 
 # Track the MINIMUM remaining value we've seen across all concurrent calls so
@@ -223,10 +253,13 @@ class BaseAgent:
         # Long read timeout: non-streaming opus calls legitimately run 10+ min.
         # Short connect timeout: a host that won't even connect should fail in
         # seconds, not eat the whole read budget. The SDK retries timeouts.
+        # Custom http_client adds TCP keepalive so the long idle wait on a
+        # non-streaming call isn't dropped by a router/NAT idle timeout.
         self.client = client or anthropic.Anthropic(
             api_key=os.environ.get("ANTHROPIC_API_KEY"),
             timeout=httpx.Timeout(connect=15.0, read=1800.0, write=120.0, pool=120.0),
             max_retries=2,
+            http_client=_build_http_client(),
         )
         self.skill_content = load_skill("practicality_mandate")
 
