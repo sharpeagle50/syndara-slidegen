@@ -129,7 +129,8 @@ RATE_LIMIT_BASE_DELAY = 15  # seconds
 
 
 def _retry_api_call(fn, *, label: str, model: str):
-    """Call fn(), retrying on 429 / 529 with exponential backoff. Returns the raw response."""
+    """Call fn(), retrying on 429 / 529 / connection errors with exponential
+    backoff. Returns the raw response."""
     for attempt in range(1, RATE_LIMIT_MAX_RETRIES + 1):
         try:
             raw = fn()
@@ -176,6 +177,30 @@ def _retry_api_call(fn, *, label: str, model: str):
                 _time.sleep(delay)
             else:
                 raise
+        except anthropic.APIConnectionError as e:
+            # Network/connection failure or read timeout (APITimeoutError is a
+            # subclass, so it's covered here too). No response was received, so
+            # retrying is safe — it can't abort a healthy in-flight call, and is
+            # what the SDK already does internally. We surface it so a flaky
+            # connection shows up in the logs instead of the agent hanging
+            # silently. No timeout values are changed — logging + the same
+            # backoff used for 529s.
+            delay = RATE_LIMIT_BASE_DELAY * (2 ** (attempt - 1))
+            delay = min(delay, 120)
+            print(
+                f"[APIConnection] connection error · agent={label} model={model} "
+                f"attempt={attempt}/{RATE_LIMIT_MAX_RETRIES} · "
+                f"waiting {delay:.0f}s · error={type(e).__name__}: {e}",
+                flush=True,
+            )
+            if attempt == RATE_LIMIT_MAX_RETRIES:
+                print(
+                    f"[APIConnection] EXHAUSTED all {RATE_LIMIT_MAX_RETRIES} retries · "
+                    f"agent={label} model={model} · raising",
+                    flush=True,
+                )
+                raise
+            _time.sleep(delay)
 
 
 class ToolPermissionError(Exception):
