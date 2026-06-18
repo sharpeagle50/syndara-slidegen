@@ -16,7 +16,7 @@ Inspect each slide for these 12 categories of defects:
 2. **text_overflow** — text cut off at edges, extending past the visible slide area
 3. **insufficient_margins** — elements too close to slide edges (< 0.5 inch visually)
 4. **low_contrast** — text hard to read against its background color
-5. **layout_repetition** — consecutive slides with identical visual layout pattern (e.g., three bullet slides in a row)
+5. **layout_repetition** — consecutive slides with identical visual layout pattern (e.g., three bullet slides in a row). EXCEPTION: a multiple-choice "Quick check"/comprehension-question slide immediately followed by the SAME slide with one option highlighted (accent fill and/or a ✓) is an INTENTIONAL question→answer-reveal pair, not a defect — never flag it as repetition or a duplicate.
 6. **placeholder_artifacts** — "Lorem ipsum", "[source]", "[insert X]", raw markdown syntax (**, ##, etc.), template placeholders left in
 7. **empty_slide** — slides with barely any content or completely blank
 8. **diagram_legibility** — diagram/chart labels too small, clipped, or unreadable
