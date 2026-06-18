@@ -132,7 +132,7 @@ Produce the JSON verdict only. No commentary outside the JSON."""
                 max_tokens=24000,
             )
         except Exception:
-            response = self.call(messages, max_tokens=4000)
+            response = self.call(messages, max_tokens=24000)
             final_text = response.content[0].text if response.content else ""
 
         return self._parse_verdict(final_text)
