@@ -195,15 +195,48 @@ def update_speaker_notes(pptx_path: str, slide_idx: int, notes: str) -> str:
     return pptx_path
 
 
-def _strip_zip_dir_entries(raw: bytes, _depth: int = 0) -> tuple[bytes, bool]:
-    """Rewrite an OOXML package (zip) without OPC-violating directory entries,
-    recursing into embedded OOXML parts. Returns (bytes, changed).
+# DrawingML preset-geometry (ST_ShapeType) aliases an LLM commonly emits that
+# are NOT valid enum values. An invalid prst= value is a schema violation, not
+# a structural one: LibreOffice silently drops the shape (invisible), while
+# PowerPoint throws the "repair" dialog and replaces it with a degenerate
+# placeholder (a diagonal line). The canonical example is `oval` — the real
+# token is `ellipse`. Normalize the common offenders to their valid tokens.
+# Keys are scoped to `prstGeom prst="..."` (not a bare `prst="..."`) so the
+# replace can only ever touch a shape's geometry attribute — never a text run,
+# a preset text-warp, or any other element that happens to contain the string.
+_PRESET_ALIASES = {
+    b'prstGeom prst="oval"': b'prstGeom prst="ellipse"',
+    b'prstGeom prst="circle"': b'prstGeom prst="ellipse"',
+    b'prstGeom prst="rectangle"': b'prstGeom prst="rect"',
+    b'prstGeom prst="square"': b'prstGeom prst="rect"',
+    b'prstGeom prst="roundedRect"': b'prstGeom prst="roundRect"',
+    b'prstGeom prst="roundRectangle"': b'prstGeom prst="roundRect"',
+    b'prstGeom prst="roundedRectangle"': b'prstGeom prst="roundRect"',
+}
 
-    PptxGenJS builds chart data workbooks with JSZip, which emits zero-byte
-    'folder' entries (names ending in '/'). The OPC spec forbids directory
-    parts, and they carry no content-type, so PowerPoint's strict parser
-    flags the file as damaged and 'repairs' it (silently dropping the chart).
-    python-pptx and LibreOffice are lenient and never surface this.
+
+def _fix_preset_aliases(data: bytes) -> tuple[bytes, bool]:
+    """Replace invalid DrawingML preset-geometry names with their valid tokens."""
+    changed = False
+    for bad, good in _PRESET_ALIASES.items():
+        if bad in data:
+            data = data.replace(bad, good)
+            changed = True
+    return data, changed
+
+
+def _sanitize_package_bytes(raw: bytes, _depth: int = 0) -> tuple[bytes, bool]:
+    """Rewrite an OOXML package (zip) to remove two classes of defect that make
+    PowerPoint flag the file as damaged, recursing into embedded OOXML parts.
+    Returns (bytes, changed).
+
+    1. OPC-violating directory entries — PptxGenJS builds chart data workbooks
+       with JSZip, which emits zero-byte 'folder' entries (names ending in '/').
+       The OPC spec forbids directory parts, and they carry no content-type, so
+       PowerPoint's strict parser flags the file as damaged and 'repairs' it
+       (silently dropping the chart). python-pptx and LibreOffice are lenient
+       and never surface this.
+    2. Invalid preset-geometry names (e.g. prst="oval") — see _PRESET_ALIASES.
     """
     import io
     import zipfile
@@ -217,9 +250,13 @@ def _strip_zip_dir_entries(raw: bytes, _depth: int = 0) -> tuple[bytes, bool]:
                 changed = True  # drop directory entry
                 continue
             data = src.read(info.filename)
-            if _depth < 3 and info.filename.lower().endswith((".xlsx", ".docx", ".pptx")):
-                data, sub_changed = _strip_zip_dir_entries(data, _depth + 1)
+            fname = info.filename.lower()
+            if _depth < 3 and fname.endswith((".xlsx", ".docx", ".pptx")):
+                data, sub_changed = _sanitize_package_bytes(data, _depth + 1)
                 changed = changed or sub_changed
+            elif fname.endswith(".xml"):
+                data, preset_changed = _fix_preset_aliases(data)
+                changed = changed or preset_changed
             zi = zipfile.ZipInfo(info.filename, date_time=info.date_time)
             zi.compress_type = info.compress_type
             dst.writestr(zi, data)
@@ -227,15 +264,17 @@ def _strip_zip_dir_entries(raw: bytes, _depth: int = 0) -> tuple[bytes, bool]:
 
 
 def sanitize_pptx(pptx_path: str) -> bool:
-    """Strip OPC-violating directory entries from a .pptx and its embedded
-    workbooks, in place. Fixes the spurious 'PowerPoint found a problem with
-    content / repaired and removed it' dialog on charts. Returns True if the
-    file was modified. Safe and idempotent — a clean file is left untouched.
+    """Repair two classes of latent defect in a .pptx in place: OPC-violating
+    directory entries (from PptxGenJS chart workbooks) and invalid preset
+    geometry names (e.g. prst="oval"). Both make PowerPoint show the spurious
+    'PowerPoint found a problem with content / repaired and removed it' dialog.
+    Returns True if the file was modified. Safe and idempotent — a clean file
+    is left untouched.
     """
     try:
         with open(pptx_path, "rb") as f:
             raw = f.read()
-        cleaned, changed = _strip_zip_dir_entries(raw)
+        cleaned, changed = _sanitize_package_bytes(raw)
         if changed:
             with open(pptx_path, "wb") as f:
                 f.write(cleaned)

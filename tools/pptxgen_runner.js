@@ -27,6 +27,44 @@ let pptxPath = '';
 let style = {};
 let strippedStyle = {}; // style colors with # stripped — ready for PptxGenJS
 
+// DrawingML preset-geometry (ST_ShapeType) aliases the model sometimes emits
+// that are NOT valid enum values. PptxGenJS passes an unknown shape name
+// straight through as prst="...", which is invalid OOXML: LibreOffice silently
+// drops the shape and PowerPoint shows a "repair" dialog and renders it as a
+// broken diagonal line. We remap at shape-creation time — the earliest possible
+// point — so the bad token never reaches the file and every render the builder
+// and QA see is already correct (no wasted revision passes downstream).
+const PRESET_ALIASES = {
+    oval: 'ellipse',
+    circle: 'ellipse',
+    rectangle: 'rect',
+    square: 'rect',
+    roundedRect: 'roundRect',
+    roundRectangle: 'roundRect',
+    roundedRectangle: 'roundRect',
+};
+
+const fixPreset = (t) =>
+    (typeof t === 'string' && PRESET_ALIASES[t]) ? PRESET_ALIASES[t] : t;
+
+// Wrap pptx.addSlide so every slide's addShape/addText normalizes preset names.
+function patchPresetAliases(p) {
+    const origAddSlide = p.addSlide.bind(p);
+    p.addSlide = function (...slideArgs) {
+        const slide = origAddSlide(...slideArgs);
+        const origAddShape = slide.addShape.bind(slide);
+        slide.addShape = (type, opts) => origAddShape(fixPreset(type), opts);
+        const origAddText = slide.addText.bind(slide);
+        slide.addText = (txt, opts) => {
+            if (opts && typeof opts.shape === 'string') {
+                opts = { ...opts, shape: fixPreset(opts.shape) };
+            }
+            return origAddText(txt, opts);
+        };
+        return slide;
+    };
+}
+
 const rl = readline.createInterface({ input: process.stdin, terminal: false });
 
 rl.on('line', (line) => {
@@ -41,6 +79,7 @@ rl.on('line', (line) => {
     try {
         if (msg.cmd === 'init') {
             pptx = new PptxGenJS();
+            patchPresetAliases(pptx);
             pptxPath = msg.pptx_path || '';
             style = msg.style || {};
 

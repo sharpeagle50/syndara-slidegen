@@ -165,6 +165,13 @@ PptxGenJS QUICK REFERENCE:
   slide.addShape('roundRect', {{ x: 1, y: 6.6, w: 2, h: 0.35,
       fill: {{ color: s.surface }}, line: {{ color: s.subtext, width: 1 }},
       rectRadius: 0.1 }});
+  // For circles / number badges use 'ellipse' (a square w==h gives a circle).
+  // CRITICAL: the valid preset names are 'ellipse', 'rect', 'roundRect' — NOT
+  // 'oval', 'circle', or 'rectangle'. PptxGenJS passes an unknown name straight
+  // through as prst="...", which is an invalid OOXML geometry: PowerPoint shows
+  // a "repair" dialog and the shape renders as a broken diagonal line.
+  slide.addShape('ellipse', {{ x: 1.5, y: 2, w: 0.5, h: 0.5,
+      fill: {{ color: s.accent }}, line: {{ width: 0 }} }});
 
   // Text inside a shape (diagram label) — ALWAYS use fit:'none' + align:'center':
   // ALL text inside shapes/boxes/cards MUST be center-aligned to prevent
