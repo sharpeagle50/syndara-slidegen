@@ -142,9 +142,16 @@ def _build_review_qa(outline: dict, work_dir: Path, style: str, qa_passes: int,
 def cmd_build(args: argparse.Namespace) -> int:
     from .agents import SlidePlannerAgent
 
+    from .tools.text_extract import extract_text_from_path, extract_text_from_dir
+
     context = args.context or ""
     if args.context_file:
-        context = (context + "\n\n" if context else "") + Path(args.context_file).read_text()
+        context = (context + "\n\n" if context else "") + extract_text_from_path(args.context_file)
+    if getattr(args, "context_dir", None):
+        _log(f"reading context from folder {args.context_dir}...")
+        dir_text = extract_text_from_dir(args.context_dir, log=_log)
+        if dir_text:
+            context = (context + "\n\n" if context else "") + dir_text
 
     work_dir = Path(tempfile.mkdtemp(prefix="deckgen_build_"))
     outline = _make_outline(args.topic, context, args.slides, args.max_words, not args.decorative)
@@ -254,7 +261,8 @@ def main(argv: list[str] | None = None) -> int:
     b = sub.add_parser("build", help="research a topic and build a deck from scratch")
     b.add_argument("topic", help="deck topic/title")
     b.add_argument("--context", default="", help="extra context to ground the content")
-    b.add_argument("--context-file", help="file whose text is appended to the context")
+    b.add_argument("--context-file", help="file to extract and append to the context (txt/md/csv/pdf/docx/xlsx)")
+    b.add_argument("--context-dir", help="folder whose supported files (txt/md/csv/pdf/docx/xlsx) are extracted and appended to the context")
     b.add_argument("--slides", type=int, default=15, help="target slide count (default: 15)")
     b.add_argument("--questions", type=int, default=2,
                    help="max in-slide comprehension questions (0 = none; default: 2)")
