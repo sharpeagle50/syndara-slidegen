@@ -18,7 +18,19 @@ from typing import IO, Optional
 # re-serializes the full deck to a zip on every render snapshot, and allocates
 # sharp/React buffers per icon. The default V8 heap can OOM at serialize time on
 # a large image-heavy deck — give it room.
-_NODE_MAX_OLD_SPACE_MB = 4096
+#
+# Configurable via SYNDARA_NODE_MAX_OLD_SPACE_MB. IMPORTANT for memory-limited
+# containers (e.g. a small production dyno): set this AT OR BELOW the container's
+# memory limit. Setting V8's ceiling above the cgroup limit lets Node grow past
+# what the container allows and get OOM-killed by the kernel — worse, not better.
+# Set to 0 (or empty) to not pass the flag at all and use Node's auto-sizing.
+def _node_max_old_space_mb() -> Optional[int]:
+    raw = os.environ.get("SYNDARA_NODE_MAX_OLD_SPACE_MB", "4096")
+    try:
+        val = int(raw)
+    except (TypeError, ValueError):
+        return 4096
+    return val if val >= 512 else None  # 0/blank/too-small → omit the flag
 
 
 class PptxGenSession:
@@ -33,8 +45,13 @@ class PptxGenSession:
         runner_path = str(Path(__file__).parent / "pptxgen_runner.js")
         node_modules = str(Path(__file__).parent / "node_modules")
 
+        _heap_mb = _node_max_old_space_mb()
+        node_argv = ["node"]
+        if _heap_mb:
+            node_argv.append(f"--max-old-space-size={_heap_mb}")
+        node_argv.append(runner_path)
         self.proc = subprocess.Popen(
-            ["node", f"--max-old-space-size={_NODE_MAX_OLD_SPACE_MB}", runner_path],
+            node_argv,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
