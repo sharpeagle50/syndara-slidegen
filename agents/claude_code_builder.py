@@ -135,11 +135,19 @@ VARIABLES IN SCOPE (every run_pptxgen_code call):
               e.g. s.bg is 'F7F8FC', s.accent is '4361EE', s.title_font is 'Calibri'
   c(hex)    — helper that strips # from a string (for edge cases)
   PptxGenJS — the PptxGenJS class (for chart type constants)
+  NOTE: these are the ONLY globals in run_pptxgen_code — there is NO require,
+  fs, process, or import. Do not try to read the filesystem from this tool.
 
 PRE-DEFINED SLIDE MASTERS (auto-created during init — use immediately):
   'CONTENT'    — palette bg + left accent bar motif
   'TITLE_DARK' — dark bg (accent color) + bottom accent strip
   'BLANK'      — palette bg, no decorations
+
+GENERATED IMAGE FILES (charts / icons / diagrams):
+  make_chart, make_icon, and make_d2_diagram each return "saved: <out_path>" —
+  the exact path you passed in. You ALWAYS know your image paths (you chose
+  them), so you never need to `ls` the images directory or probe the filesystem
+  to find them. Insert directly with sl.addImage({{ path: '<out_path>' }}).
 
 PptxGenJS QUICK REFERENCE:
   // Content slide using pre-defined master:
