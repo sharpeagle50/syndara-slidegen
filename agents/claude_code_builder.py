@@ -78,9 +78,17 @@ YOUR JOB, in order:
    Build the visual FIRST, then add the minimal on-slide text around it.
    Pick the right tool for the job:
      - **Linear process flows and step sequences**: build with MANUAL
-       PptxGenJS shapes (addShape + addText). Native vector objects are
-       crisper than any rendered PNG and match the slide palette exactly.
-       See SERPENTINE LAYOUT below for chains longer than 5 steps.
+       PptxGenJS shapes (addShape + addText) — boxes/chevrons placed in
+       sequence. Native vector objects are crisper than any rendered PNG and
+       match the slide palette exactly. See SERPENTINE LAYOUT below for chains
+       longer than 5 steps.
+       ⛔ NEVER draw a connector or a line that JOINS two shapes (no PptxGenJS
+       LINE between nodes, no python-pptx add_connector, no `cxnSp`). They
+       render with wrong endpoints, get flagged by visual QA, and cannot be
+       cleanly removed — repairing them later is extremely expensive. To show
+       flow, put a standalone chevron/triangle arrow SHAPE or a "→" text glyph
+       BETWEEN the boxes. If you genuinely need routed edges among many nodes,
+       use make_d2_diagram (a clean PNG) instead.
      - **Simple charts** (bar, line, pie, doughnut with clean data): use
        PptxGenJS NATIVE CHARTS via slide.addChart() in run_pptxgen_code.
        These are editable in PowerPoint and look crisp at any zoom.
@@ -702,9 +710,12 @@ END OF PLAN
 INSTRUCTIONS — follow in order for EACH slide:
 1. Read the plan section for this slide. Note the **Visual elements** type.
 2. If the visual type is NOT 'none', generate the visual FIRST:
-   - Linear flows / step sequences → manual PptxGenJS shapes (preferred —
-     native vectors, crisper, palette-matched). Use serpentine wrap for >5
-     steps.
+   - Linear flows / step sequences → manual shapes (boxes/chevrons in
+     sequence; native vectors, crisper, palette-matched). Use serpentine wrap
+     for >5 steps. ⛔ NEVER join shapes with a connector/line (no add_connector,
+     no `cxnSp`, no LINE between nodes) — they render wrong and can't be
+     cleanly removed. Show flow with a standalone chevron/arrow SHAPE or a "→"
+     glyph between boxes; for routed edges among many nodes use make_d2_diagram.
    - Complex branching diagrams / architecture → make_d2_diagram, then
      insert PNG preserving aspect ratio.
    - Sequence / ER / gantt / state → make_mermaid_diagram, then insert
