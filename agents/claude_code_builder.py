@@ -16,6 +16,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import shutil
 import tempfile
 import traceback
 from pathlib import Path
@@ -951,6 +952,14 @@ bullets is WRONG. You MUST generate the visual. This is non-negotiable.
             snap_result = pptxgen_session.snapshot(snap_path)
             if snap_result.get("success") and Path(snap_path).exists():
                 render_path = snap_path
+                # Persist the latest full deck to the real output path. The
+                # snapshot already serialized it, so this is just a file copy —
+                # if the Node worker dies before the final save(), the build
+                # falls back to this instead of losing everything.
+                try:
+                    shutil.copyfile(snap_path, pptx_path)
+                except Exception:
+                    pass
 
         try:
             b64 = render_tool.render_slide_png_b64(render_path, args["slide_index"])
@@ -973,7 +982,6 @@ bullets is WRONG. You MUST generate the visual. This is non-negotiable.
             }
         finally:
             if snap_dir:
-                import shutil
                 shutil.rmtree(snap_dir, ignore_errors=True)
 
     @tool(
@@ -1144,6 +1152,12 @@ bullets is WRONG. You MUST generate the visual. This is non-negotiable.
             save_result = pptxgen_session.save()
             if not save_result.get("success"):
                 print(f"[{_label}] PPTXGEN SAVE WARNING: {save_result.get('error')}", flush=True)
+                if Path(pptx_path).exists():
+                    print(
+                        f"[{_label}] RECOVERED: final save failed (worker died), "
+                        f"falling back to last persisted snapshot at {pptx_path}",
+                        flush=True,
+                    )
             else:
                 print(
                     f"[{_label}] PPTXGEN SAVED: {save_result.get('slide_count')} slides to {pptx_path}",
@@ -1154,7 +1168,8 @@ bullets is WRONG. You MUST generate the visual. This is non-negotiable.
 
     if not Path(pptx_path).exists():
         raise RuntimeError(
-            f"Claude Code builder returned but no pptx at {pptx_path}. "
+            f"Claude Code builder returned but no pptx at {pptx_path}. The PptxGenJS "
+            f"worker died before any deck was persisted (no render snapshot taken). "
             f"Final message: {(final_result or '')[:400]}"
         )
 

@@ -9,8 +9,16 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import threading
+from collections import deque
 from pathlib import Path
 from typing import IO, Optional
+
+# Headroom for the long-lived Node worker: it holds the whole deck in memory,
+# re-serializes the full deck to a zip on every render snapshot, and allocates
+# sharp/React buffers per icon. The default V8 heap can OOM at serialize time on
+# a large image-heavy deck — give it room.
+_NODE_MAX_OLD_SPACE_MB = 4096
 
 
 class PptxGenSession:
@@ -26,7 +34,7 @@ class PptxGenSession:
         node_modules = str(Path(__file__).parent / "node_modules")
 
         self.proc = subprocess.Popen(
-            ["node", runner_path],
+            ["node", f"--max-old-space-size={_NODE_MAX_OLD_SPACE_MB}", runner_path],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -36,6 +44,13 @@ class PptxGenSession:
         self._stdin = self.proc.stdin  # type: ignore[assignment]
         self._stdout = self.proc.stdout  # type: ignore[assignment]
         self._stderr = self.proc.stderr  # type: ignore[assignment]
+        # Continuously drain stderr in a daemon thread. Without this, the OS
+        # pipe buffer (~64KB) fills on a chatty/long build and Node blocks on
+        # its next stderr write (deadlock); and on a crash we lose the reason
+        # because stderr was only ever read post-mortem. Keep a bounded tail.
+        self._stderr_lines: deque[str] = deque(maxlen=400)
+        self._stderr_thread = threading.Thread(target=self._drain_stderr, daemon=True)
+        self._stderr_thread.start()
         # Send init command
         init_result = self._send({
             "cmd": "init",
@@ -80,26 +95,42 @@ class PptxGenSession:
             self.proc.kill()
         return result
 
+    def _drain_stderr(self) -> None:
+        """Read the worker's stderr line by line until EOF (process exit),
+        keeping a bounded tail. Runs in a daemon thread."""
+        try:
+            for line in self._stderr:
+                self._stderr_lines.append(line.rstrip("\n"))
+        except Exception:
+            pass
+
+    def _stderr_tail(self, wait: bool = False) -> str:
+        """Return the most recent stderr lines. If wait=True (the process is
+        expected to have died), give the drain thread a moment to flush the
+        final output before reading."""
+        if wait:
+            # Once the process exits, the stderr pipe hits EOF and the drain
+            # thread finishes — this returns promptly with the death reason.
+            self._stderr_thread.join(timeout=1.0)
+            exit_code = self.proc.poll()
+            tail = "\n".join(list(self._stderr_lines))
+            if not tail and exit_code is not None and exit_code < 0:
+                # Killed by a signal with no output — almost always the OOM
+                # killer (SIGKILL=-9). Make that legible instead of "empty".
+                return f"(no stderr; worker killed by signal {-exit_code} — likely out of memory)"
+            return tail
+        return "\n".join(list(self._stderr_lines))
+
     def _send(self, msg: dict) -> dict:
         try:
             self._stdin.write(json.dumps(msg) + "\n")
             self._stdin.flush()
         except (BrokenPipeError, OSError) as e:
-            stderr = ""
-            try:
-                stderr = self._stderr.read()
-            except Exception:
-                pass
-            return {"success": False, "error": f"Pipe error: {e}. stderr: {stderr[:1000]}"}
+            return {"success": False, "error": f"Pipe error: {e}. stderr: {self._stderr_tail(wait=True)[:1000]}"}
 
         line = self._stdout.readline()
         if not line:
-            stderr = ""
-            try:
-                stderr = self._stderr.read()
-            except Exception:
-                pass
-            return {"success": False, "error": f"Node process died: {stderr[:1000]}"}
+            return {"success": False, "error": f"Node process died: {self._stderr_tail(wait=True)[:1000]}"}
         try:
             return json.loads(line)
         except json.JSONDecodeError:
