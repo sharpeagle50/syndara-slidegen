@@ -142,11 +142,17 @@ def _build_review_qa(outline: dict, work_dir: Path, style: str, qa_passes: int,
 def cmd_build(args: argparse.Namespace) -> int:
     from .agents import SlidePlannerAgent
 
-    from .tools.text_extract import extract_text_from_path, extract_text_from_dir
+    from .tools.text_extract import extract_text_from_path, extract_text_from_dir, UnsupportedFileType
 
     context = args.context or ""
     if args.context_file:
-        context = (context + "\n\n" if context else "") + extract_text_from_path(args.context_file)
+        try:
+            file_text = extract_text_from_path(args.context_file)
+        except UnsupportedFileType:
+            # An explicit file the user pointed at — treat an unknown extension
+            # as plain text, preserving the original read_text() behavior.
+            file_text = Path(args.context_file).read_text(errors="replace")
+        context = (context + "\n\n" if context else "") + file_text
     if getattr(args, "context_dir", None):
         _log(f"reading context from folder {args.context_dir}...")
         dir_text = extract_text_from_dir(args.context_dir, log=_log)
