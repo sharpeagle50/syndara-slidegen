@@ -51,3 +51,9 @@ def apply_watermark(pptx_path: str, watermark_image_path: str, mode: str):
             slide.shapes.add_picture(watermark_image_path, br_left, br_top, br_w, br_h)
 
     prs.save(pptx_path)
+
+    # python-pptx's re-save runs after the builder's own sanitize pass and can
+    # leave OPC/ZIP quirks that trigger PowerPoint's spurious "repair" dialog —
+    # clean the file we just wrote so a watermarked deck always opens cleanly.
+    from .pptx_tool import sanitize_pptx
+    sanitize_pptx(pptx_path)
