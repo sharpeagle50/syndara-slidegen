@@ -21,7 +21,7 @@ Inspect each slide for these 12 categories of defects:
 7. **empty_slide** — slides with barely any content or completely blank
 8. **diagram_legibility** — diagram/chart labels too small, clipped, or unreadable
 9. **inconsistent_styling** — slides that don't match the expected color palette or font style
-10. **excessive_text** — slides with too many words visible (more than ~{max_words} words of on-slide text)
+10. **excessive_text** — slides with too many words visible (more than ~{max_words} words of on-slide text). EXCEPTION: a references / sources / citations / bibliography / further-reading slide (a list of citation entries) is EXEMPT — full citations legitimately exceed the word limit; never flag such a slide as excessive_text or tell the builder to shorten the citations.
 11. **broken_connectors** — connecting lines in diagrams that don't actually reach their target shapes, protrude past them, overlap/cut through other shapes, or stop short. Lines should start at one shape edge and end at another — flag any that look disconnected, misrouted, or visually broken
 12. **misaligned_elements** — elements that visually appear intended to be aligned but aren't. Check: titles or centered text that's slightly off-center on the slide; icons or images that don't line up vertically with adjacent text; columns or grid items at inconsistent heights; rows of elements with uneven spacing. Only flag when the misalignment is clearly unintentional — deliberate asymmetric or staggered layouts are fine
 
