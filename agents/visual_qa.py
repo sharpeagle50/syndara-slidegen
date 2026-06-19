@@ -178,7 +178,7 @@ class VisualQAAgent:
                 raw = _retry_api_call(
                     lambda: self.client.messages.with_raw_response.create(
                         model=self.model,
-                        max_tokens=2048,
+                        max_tokens=8192,
                         system=system_prompt,
                         messages=[{
                             "role": "user",
@@ -266,7 +266,7 @@ class VisualQAAgent:
         raw = _retry_api_call(
             lambda: self.client.messages.with_raw_response.create(
                 model=self.model,
-                max_tokens=2048,
+                max_tokens=8192,
                 messages=[{"role": "user", "content": instruction}],
             ),
             label="VisualQA-reformat",
