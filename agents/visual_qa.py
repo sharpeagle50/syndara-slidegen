@@ -156,6 +156,7 @@ class VisualQAAgent:
                     "text": palette_str,
                 })
 
+            raw_text = ""
             try:
                 system_prompt = QA_SYSTEM_PROMPT.replace("{max_words}", str(max_words_per_slide))
                 if revision_feedback:
@@ -191,23 +192,37 @@ class VisualQAAgent:
                 raw_text = response.content[0].text.strip()
                 # Parse JSON from the response
                 batch_result = json.loads(raw_text)
-                for slide_defect in batch_result.get("slides", []):
-                    # Convert 1-based slide_index from Haiku to 0-based
-                    slide_idx = slide_defect.get("slide_index", 1) - 1
-                    all_defects.append({
-                        "slide_index": slide_idx,
-                        "issues": slide_defect.get("issues", []),
-                        "description": slide_defect.get("description", ""),
-                        "suggestion": slide_defect.get("suggestion", ""),
-                    })
+                all_defects.extend(self._defects_from(batch_result))
             except (json.JSONDecodeError, KeyError, IndexError) as parse_err:
                 slide_nums = [s + 1 for s, _ in batch]
-                print(
-                    f"[VisualQA] JSON parse failed for slides {slide_nums}: {parse_err}. "
-                    f"Raw response: {raw_text[:500] if 'raw_text' in dir() else '(unavailable)'}",
-                    flush=True,
-                )
-                continue
+                # The model answered in prose instead of JSON. Dropping the batch
+                # here silently ships real defects — a deck can pass every QA pass
+                # with known overlaps/broken connectors sitting in the unparsed
+                # text. Ask the model to reformat its own analysis into the JSON
+                # schema and reparse; only if THAT also fails do we flag the slides
+                # for re-inspection rather than treating them as clean.
+                recovered = False
+                if raw_text:
+                    try:
+                        reformatted = self._reformat_to_json(raw_text)
+                        all_defects.extend(self._defects_from(json.loads(reformatted)))
+                        recovered = True
+                        print(f"[VisualQA] recovered slides {slide_nums} via JSON reformat", flush=True)
+                    except Exception as reformat_err:
+                        print(f"[VisualQA] reformat retry failed for slides {slide_nums}: {reformat_err}", flush=True)
+                if not recovered:
+                    print(
+                        f"[VisualQA] JSON parse failed for slides {slide_nums}: {parse_err}. "
+                        f"Raw response: {raw_text[:300] if raw_text else '(unavailable)'}",
+                        flush=True,
+                    )
+                    for s, _ in batch:
+                        all_defects.append({
+                            "slide_index": s,
+                            "issues": ["qa_unparsed"],
+                            "description": "QA response could not be parsed; this slide was not verified.",
+                            "suggestion": "Re-inspect for overlapping text, text overflow, and broken or misrouted connectors.",
+                        })
 
         if _qa_render_dir:
             import shutil
@@ -219,3 +234,42 @@ class VisualQAAgent:
             "defect_count": defect_count,
             "slides": all_defects,
         }
+
+    @staticmethod
+    def _defects_from(batch_result: dict) -> list[dict]:
+        """Map a parsed QA batch result into internal defect dicts (converting
+        the model's 1-based slide_index to 0-based)."""
+        out: list[dict] = []
+        for slide_defect in batch_result.get("slides", []):
+            out.append({
+                "slide_index": slide_defect.get("slide_index", 1) - 1,
+                "issues": slide_defect.get("issues", []),
+                "description": slide_defect.get("description", ""),
+                "suggestion": slide_defect.get("suggestion", ""),
+            })
+        return out
+
+    def _reformat_to_json(self, prose: str) -> str:
+        """The QA model sometimes returns its findings as prose instead of JSON,
+        which would otherwise drop the whole batch's defects. Ask it to convert
+        that analysis into the strict schema so the defects aren't lost."""
+        from .base import _retry_api_call
+        instruction = (
+            "Convert the following slide QA analysis into ONLY valid JSON — no "
+            "markdown fences, no prose — in this exact format:\n"
+            '{"slides": [{"slide_index": <1-based slide number>, '
+            '"issues": ["category_name"], "description": "what is wrong", '
+            '"suggestion": "specific fix"}]}\n'
+            'Include ONLY slides that have a real defect. If none do, return '
+            '{"slides": []}.\n\nANALYSIS:\n' + prose
+        )
+        raw = _retry_api_call(
+            lambda: self.client.messages.with_raw_response.create(
+                model=self.model,
+                max_tokens=2048,
+                messages=[{"role": "user", "content": instruction}],
+            ),
+            label="VisualQA-reformat",
+            model=self.model,
+        )
+        return raw.parse().content[0].text.strip()
