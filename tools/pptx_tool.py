@@ -258,6 +258,33 @@ def _fix_chart_value_axis_titles(data: bytes) -> tuple[bytes, bool]:
     return new, changed
 
 
+def _fix_chart_orphan_axids(data: bytes) -> tuple[bytes, bool]:
+    """Drop chart axis references that point to no defined axis.
+
+    PptxGenJS emits native 2-D bar charts whose <c:barChart> lists THREE
+    <c:axId> entries while only two axes (<c:catAx> + <c:valAx>) are defined —
+    the third id matches nothing. PowerPoint requires every axId in a chart
+    group to resolve to a defined axis, so it flags the deck as damaged and
+    shows the 'repair' dialog (and drops the chart). python-pptx, LibreOffice,
+    and our repair-scanner all tolerate the orphan, which is why it survives QA
+    and the structural checks. Remove any <c:axId val="N"/> whose N is not the
+    id of a defined axis (a real serAx/dateAx keeps its id, so 3-D charts and
+    secondary axes are untouched).
+    """
+    defined = set(re.findall(
+        rb"<c:(?:catAx|valAx|dateAx|serAx)>\s*<c:axId val=\"(\d+)\"", data))
+    if not defined:
+        return data, False
+    referenced = set(re.findall(rb"<c:axId val=\"(\d+)\"\s*/>", data))
+    orphans = referenced - defined
+    if not orphans:
+        return data, False
+    new = data
+    for oid in orphans:
+        new = re.sub(rb"<c:axId val=\"" + re.escape(oid) + rb"\"\s*/>", b"", new)
+    return new, new != data
+
+
 def _sanitize_package_bytes(raw: bytes, _depth: int = 0) -> tuple[bytes, bool]:
     """Rewrite an OOXML package (zip) to remove two classes of defect that make
     PowerPoint flag the file as damaged, recursing into embedded OOXML parts.
@@ -293,6 +320,8 @@ def _sanitize_package_bytes(raw: bytes, _depth: int = 0) -> tuple[bytes, bool]:
                 if "charts/chart" in fname:
                     data, axis_changed = _fix_chart_value_axis_titles(data)
                     changed = changed or axis_changed
+                    data, axid_changed = _fix_chart_orphan_axids(data)
+                    changed = changed or axid_changed
             zi = zipfile.ZipInfo(info.filename, date_time=info.date_time)
             zi.compress_type = info.compress_type
             dst.writestr(zi, data)
