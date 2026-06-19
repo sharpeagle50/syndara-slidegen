@@ -9,17 +9,29 @@ using web_search. You have NO write tools. You can only read and search. Your
 output is a verdict that tells the Builder what to fix.
 
 FACT-CHECK RULES (treat as required, not optional):
-- For EVERY tool named on a slide, run web_search to confirm: does it exist? Is
-  it still current? Are its features/commands as described? Search "[tool name]
-  2025" or "[tool name] features" — do not trust the Builder's claims.
-- For EVERY specific prompt, command, keyboard shortcut, or API call, run
-  web_search to confirm it's accurate TODAY. Tools change frequently. A command
-  from 2023 may no longer exist.
-- For EVERY statistic, date, or factual claim, run web_search to verify.
-- If you cannot verify a claim via search within 2 attempts, flag it as
-  `unverified` and tell the Builder to either remove or rephrase.
-- Error on the side of demanding verification. False confidence in learner-
-  facing material costs Syndara's credibility.
+- GROUNDING FIRST: If the review request includes an AUTHORITATIVE PLAN (a
+  researched, source-cited content plan plus its list of sources), that plan is
+  the source of truth. The planner already web-searched and cited those facts.
+  Your fact-checking job is to catch where the BUILDER DRIFTED from the plan —
+  NOT to re-litigate the planner's research:
+    * Any statistic, date, name, tool, or claim on a slide that also appears in
+      the plan is already researched and cited. Treat it as VERIFIED. Do NOT
+      flag it `unverified`, and NEVER tell the Builder to remove or water down a
+      fact that is grounded in the plan. Stripping cited, researched material is
+      itself a defect — it is the single worst thing you can do here.
+    * Only fact-check a claim that appears on a slide but does NOT trace to the
+      plan or its sources — those are Builder additions. Run web_search on
+      those; if you cannot confirm within 2 attempts, flag `unverified`.
+  When NO plan is provided, fact-check every claim from scratch using the rules
+  below.
+- For EVERY tool, prompt, command, shortcut, API call, statistic, or date that
+  is NOT already grounded in the plan, run web_search to confirm it exists and
+  is accurate TODAY (search "[tool name] 2025" / "[tool name] features"). Tools
+  change frequently; a command from 2023 may no longer exist.
+- If you cannot verify such a NON-PLAN claim within 2 attempts, flag it
+  `unverified` and tell the Builder to remove or rephrase it.
+- Error on the side of demanding verification for Builder additions — but never
+  at the cost of deleting a plan-backed, already-cited fact.
 
 CONTENT STANDARD (from skills/practicality_mandate):
 For each slide, evaluate:
@@ -86,14 +98,40 @@ class ReviewerAgent(BaseAgent):
     system_prompt = REVIEWER_SYSTEM
 
     def review_slides(self, slide_content: list[dict], cycle: int = 1,
-                      revision_feedback: str = "") -> dict:
+                      revision_feedback: str = "", plan_context: dict | None = None) -> dict:
         """
         Review extracted slide content.
         slide_content: list of {slide_index, text, speaker_notes}
         revision_feedback: if set, only check whether this feedback was addressed.
+        plan_context: {markdown, sources} — the planner's already-researched,
+            source-cited plan. When provided, the reviewer verifies on-slide
+            facts AGAINST it instead of re-deriving them blind: facts grounded
+            in the plan are treated as cited (never stripped), and only Builder
+            additions not supported by the plan get fact-checked.
         Returns a verdict dict.
         """
         content_summary = json.dumps(slide_content, indent=2)
+
+        if plan_context and plan_context.get("markdown"):
+            _sources = plan_context.get("sources") or []
+            _src_lines = "\n".join(f"- {s}" for s in _sources[:60]) or "(none listed)"
+            plan_block = f"""
+AUTHORITATIVE PLAN — already researched and source-cited by the planner. This is
+the source of truth for facts. A fact on a slide that traces to this plan is
+already verified and cited: do NOT flag it `unverified` and do NOT tell the
+Builder to remove it. Use web_search ONLY for claims that appear on a slide but
+are NOT supported by this plan or its sources (Builder additions).
+
+PLAN CONTENT:
+{plan_context['markdown']}
+
+SOURCES the planner used (deck-wide):
+{_src_lines}
+"""
+        else:
+            plan_block = ('\nUse web_search to verify any tool names or facts '
+                          'you are uncertain about (e.g., search "ChatGPT '
+                          'features 2025" or "is [ToolName] still available").\n')
 
         if revision_feedback:
             user_msg = f"""Review cycle {cycle}. A creator requested this specific revision:
@@ -103,17 +141,15 @@ CREATOR'S REQUEST:
 
 Check ONLY whether the revised slide(s) below correctly and adequately address the creator's request. Do NOT flag anything else — no new suggestions, no unrelated issues. Just verify the requested change was made.
 
-Use web_search to verify any factual claims introduced by the revision (tool names, commands, etc.).
-
+Use web_search to verify any factual claims introduced by the revision (tool names, commands, etc.). Facts that the revision draws from the authoritative plan below are already cited — do not flag or strip those.
+{plan_block}
 REVISED SLIDES:
 {content_summary}
 
 Produce the JSON verdict only. No commentary outside the JSON."""
         else:
             user_msg = f"""Review cycle {cycle}. Evaluate these slides against the Practicality Mandate content standard.
-
-Use web_search to verify any tool names you're uncertain about (e.g., search "ChatGPT features 2025" or "is [ToolName] still available").
-
+{plan_block}
 SLIDES TO REVIEW:
 {content_summary}
 

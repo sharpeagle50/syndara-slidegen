@@ -98,7 +98,10 @@ def _build_review_qa(outline: dict, work_dir: Path, style: str, qa_passes: int,
         if cycle == OUTER_MAX:
             break
         slide_content = pptx_tool.extract_text_content(pptx_path)
-        verdict = reviewer.review_slides(slide_content, cycle)
+        _plan = outline.get("approved_slide_plan")
+        plan_context = ({"markdown": _plan.get("markdown", ""), "sources": _plan.get("sources") or []}
+                        if isinstance(_plan, dict) else None)
+        verdict = reviewer.review_slides(slide_content, cycle, plan_context=plan_context)
         _log(f"reviewer: {verdict.get('status', 'approved')}")
         if verdict.get("status", "approved") != "approved":
             _flagged = [s.get("slide_index") for s in (verdict.get("slides") or []) if s.get("status") == "revise"]
