@@ -181,6 +181,12 @@ PptxGenJS QUICK REFERENCE:
   // a "repair" dialog and the shape renders as a broken diagonal line.
   slide.addShape('ellipse', {{ x: 1.5, y: 2, w: 0.5, h: 0.5,
       fill: {{ color: s.accent }}, line: {{ width: 0 }} }});
+  // CONTRAST (text on filled shapes / table cells): the text color MUST contrast
+  // with the fill it sits on. NEVER use s.accent or s.accent2 for text on a shape
+  // or cell filled with that same color — it renders invisible (e.g. orange text
+  // on an orange header cell). Rule: on an accent or dark fill use color: s.bg
+  // (light text); on a light fill (s.bg / s.surface / s.highlight) use color:
+  // s.text (dark text).
 
   // Text inside a shape (diagram label) — ALWAYS use fit:'none' + align:'center':
   // ALL text inside shapes/boxes/cards MUST be center-aligned to prevent

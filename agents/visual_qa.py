@@ -92,7 +92,7 @@ class VisualQAAgent:
                         max_words_per_slide: int = 20) -> dict:
         """Core inspection logic, may raise."""
         from ..tools.qa_render import render_all_slides
-        from .base import _retry_api_call
+        from .base import _retry_api_call, extract_json
 
         jpegs = render_all_slides(pptx_path)
         if not jpegs:
@@ -190,10 +190,11 @@ class VisualQAAgent:
                 )
                 response = raw.parse()
                 raw_text = response.content[0].text.strip()
-                # Parse JSON from the response
-                batch_result = json.loads(raw_text)
+                # Robust parse: handles fenced ```json blocks and surrounding
+                # prose (same helper the reviewer uses), not just bare JSON.
+                batch_result = extract_json(raw_text)
                 all_defects.extend(self._defects_from(batch_result))
-            except (json.JSONDecodeError, KeyError, IndexError) as parse_err:
+            except (json.JSONDecodeError, ValueError, KeyError, IndexError) as parse_err:
                 slide_nums = [s + 1 for s, _ in batch]
                 # The model answered in prose instead of JSON. Dropping the batch
                 # here silently ships real defects — a deck can pass every QA pass
@@ -205,7 +206,7 @@ class VisualQAAgent:
                 if raw_text:
                     try:
                         reformatted = self._reformat_to_json(raw_text)
-                        all_defects.extend(self._defects_from(json.loads(reformatted)))
+                        all_defects.extend(self._defects_from(extract_json(reformatted)))
                         recovered = True
                         print(f"[VisualQA] recovered slides {slide_nums} via JSON reformat", flush=True)
                     except Exception as reformat_err:
