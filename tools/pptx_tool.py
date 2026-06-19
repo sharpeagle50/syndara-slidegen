@@ -1,6 +1,7 @@
 """PPTX tool: creates and modifies PowerPoint files via python-pptx."""
 from __future__ import annotations
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -225,6 +226,38 @@ def _fix_preset_aliases(data: bytes) -> tuple[bytes, bool]:
     return data, changed
 
 
+def _fix_chart_value_axis_titles(data: bytes) -> tuple[bytes, bool]:
+    """Rotate native-chart value-axis (y) titles to vertical.
+
+    PptxGenJS emits value-axis titles with no rotation (<a:bodyPr/>). PowerPoint
+    then renders the y-axis title HORIZONTAL and detached from the axis (its
+    default for a missing rot); LibreOffice happens to default it vertical, which
+    hides the bug in QA renders. Make the rotation explicit — rot="-5400000"
+    (-90deg, the exact value PowerPoint itself writes for a y-axis title) — on
+    each value-axis title's bodyPr. Category-axis (x) titles are deliberately
+    left horizontal, so the patch is scoped to <c:valAx> blocks only.
+    """
+    changed = False
+
+    def _patch_valax(block_m: "re.Match[bytes]") -> bytes:
+        nonlocal changed
+
+        def _add_rot(title_m: "re.Match[bytes]") -> bytes:
+            nonlocal changed
+            if b"rot=" in title_m.group(3):       # already rotated — leave it
+                return title_m.group(0)
+            changed = True
+            return (title_m.group(1) + title_m.group(2) + title_m.group(3)
+                    + b' rot="-5400000"' + title_m.group(4))
+
+        # only the first <a:bodyPr> inside THIS value axis's <c:title>
+        return re.sub(rb"(<c:title>.*?)(<a:bodyPr)([^>]*?)(/?>)",
+                      _add_rot, block_m.group(0), count=1, flags=re.S)
+
+    new = re.sub(rb"<c:valAx>.*?</c:valAx>", _patch_valax, data, flags=re.S)
+    return new, changed
+
+
 def _sanitize_package_bytes(raw: bytes, _depth: int = 0) -> tuple[bytes, bool]:
     """Rewrite an OOXML package (zip) to remove two classes of defect that make
     PowerPoint flag the file as damaged, recursing into embedded OOXML parts.
@@ -257,6 +290,9 @@ def _sanitize_package_bytes(raw: bytes, _depth: int = 0) -> tuple[bytes, bool]:
             elif fname.endswith(".xml"):
                 data, preset_changed = _fix_preset_aliases(data)
                 changed = changed or preset_changed
+                if "charts/chart" in fname:
+                    data, axis_changed = _fix_chart_value_axis_titles(data)
+                    changed = changed or axis_changed
             zi = zipfile.ZipInfo(info.filename, date_time=info.date_time)
             zi.compress_type = info.compress_type
             dst.writestr(zi, data)
