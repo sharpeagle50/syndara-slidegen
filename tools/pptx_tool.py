@@ -285,6 +285,141 @@ def _fix_chart_orphan_axids(data: bytes) -> tuple[bytes, bool]:
     return new, new != data
 
 
+def _fix_degenerate_shape_xfrms(data: bytes) -> tuple[bytes, bool]:
+    """Give zero/negative-area shapes a valid positive extent.
+
+    PptxGenJS draws straight horizontal/vertical lines as <p:sp> autoshapes
+    whose <a:ext> has a zero dimension (cy=0 for a horizontal line, cx=0 for a
+    vertical one) and occasionally a negative one. PowerPoint rejects a
+    zero/negative-area shape extent and shows the 'repair' dialog; python-pptx,
+    LibreOffice, and our scanner all tolerate it (LibreOffice silently rewrites
+    it on re-save, which is why a round-tripped copy opens cleanly). Normalize
+    each SHAPE xfrm: flip negative extents (preserving geometry via off +
+    flipH/flipV) and clamp any remaining zero dimension to 1 EMU. The root
+    group's xfrm (ext 0x0, followed by chOff/chExt) is matched-out because its
+    <a:ext> is not immediately followed by </a:xfrm>, so the legitimate 0x0
+    group bounds are left untouched.
+    """
+    changed = False
+
+    def _norm(m: "re.Match[bytes]") -> bytes:
+        nonlocal changed
+        attrs = m.group(1).decode()
+        x, y, cx, cy = (int(m.group(i)) for i in (2, 3, 4, 5))
+        fh = 'flipH="1"' in attrs
+        fv = 'flipV="1"' in attrs
+        rot = re.search(r'rot="(-?\d+)"', attrs)
+        nx, ny, ncx, ncy, nfh, nfv = x, y, cx, cy, fh, fv
+        if ncx < 0:
+            nx += ncx; ncx = -ncx; nfh = not nfh
+        if ncy < 0:
+            ny += ncy; ncy = -ncy; nfv = not nfv
+        if ncx == 0:
+            ncx = 1
+        if ncy == 0:
+            ncy = 1
+        if (nx, ny, ncx, ncy, nfh, nfv) == (x, y, cx, cy, fh, fv):
+            return m.group(0)
+        changed = True
+        a = ""
+        if rot:
+            a += f' rot="{rot.group(1)}"'
+        if nfh:
+            a += ' flipH="1"'
+        if nfv:
+            a += ' flipV="1"'
+        return (f'<a:xfrm{a}><a:off x="{nx}" y="{ny}"/>'
+                f'<a:ext cx="{ncx}" cy="{ncy}"/></a:xfrm>').encode()
+
+    new = re.sub(
+        rb'<a:xfrm([^>]*)><a:off x="(-?\d+)" y="(-?\d+)"/>'
+        rb'<a:ext cx="(-?\d+)" cy="(-?\d+)"/></a:xfrm>',
+        _norm, data)
+    return new, changed
+
+
+def _split_shared_master_themes(raw: bytes) -> tuple[bytes, bool]:
+    """Give every master its own theme part.
+
+    PowerPoint requires each master (slide / notes / handout) to reference a
+    DISTINCT theme part. PptxGenJS emits a single theme1.xml shared by the slide
+    master and the notes master; PowerPoint rejects the shared reference and
+    shows the 'repair' dialog (then strips the notes master), while python-pptx,
+    LibreOffice, and our scanner all tolerate it — LibreOffice silently clones
+    the theme on re-save, which is why a round-tripped copy opens cleanly. When a
+    theme is referenced by more than one master, clone it so each extra master
+    gets its own copy, repoint that master's relationship, and register the new
+    part's content type. Idempotent: a deck whose masters already have distinct
+    themes is returned unchanged.
+    """
+    import io
+    import posixpath
+    import zipfile
+
+    src = zipfile.ZipFile(io.BytesIO(raw))
+    names = src.namelist()
+    master_rels = [n for n in names if re.match(
+        r"ppt/(?:slide|notes|handout)Masters/_rels/[^/]+\.xml\.rels$", n)]
+    theme_users: "dict[str, list[tuple[str, str]]]" = {}
+    for rn in master_rels:
+        text = src.read(rn).decode("utf-8", "replace")
+        base = posixpath.dirname(posixpath.dirname(rn))
+        for m in re.finditer(r"<Relationship\b([^>]*)/?>", text):
+            attrs = dict(re.findall(r'(\w+)="([^"]*)"', m.group(1)))
+            if attrs.get("Type", "").endswith("/theme"):
+                tgt = posixpath.normpath(posixpath.join(base, attrs.get("Target", "")))
+                theme_users.setdefault(tgt, []).append((rn, attrs.get("Id", "")))
+
+    shared = {t: u for t, u in theme_users.items() if len(u) > 1}
+    if not shared:
+        return raw, False
+
+    used = [int(mm.group(1)) for n in names
+            for mm in [re.match(r"ppt/theme/theme(\d+)\.xml$", n)] if mm]
+    idx = (max(used) + 1) if used else 1
+
+    new_parts: "dict[str, bytes]" = {}
+    rels_edits: "dict[str, list[tuple[str, str]]]" = {}
+    ct_adds: "list[str]" = []
+    for theme_part, users in shared.items():
+        body = src.read(theme_part)
+        for rels_name, rel_id in users[1:]:   # the first master keeps the original
+            new_theme = f"ppt/theme/theme{idx}.xml"
+            idx += 1
+            new_parts[new_theme] = body
+            ct_adds.append(new_theme)
+            base = posixpath.dirname(posixpath.dirname(rels_name))
+            rels_edits.setdefault(rels_name, []).append(
+                (rel_id, posixpath.relpath(new_theme, base)))
+
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as dst:
+        for info in src.infolist():
+            data = src.read(info.filename)
+            if info.filename in rels_edits:
+                t = data.decode("utf-8", "replace")
+                for rel_id, new_target in rels_edits[info.filename]:
+                    t = re.sub(
+                        r'(<Relationship\b[^>]*\bId="' + re.escape(rel_id)
+                        + r'"[^>]*\bTarget=")[^"]*(")',
+                        lambda mm, nt=new_target: mm.group(1) + nt + mm.group(2),
+                        t, count=1)
+                data = t.encode("utf-8")
+            elif info.filename == "[Content_Types].xml":
+                t = data.decode("utf-8", "replace")
+                adds = "".join(
+                    f'<Override PartName="/{p}" ContentType='
+                    f'"application/vnd.openxmlformats-officedocument.theme+xml"/>'
+                    for p in ct_adds)
+                data = t.replace("</Types>", adds + "</Types>").encode("utf-8")
+            zi = zipfile.ZipInfo(info.filename, date_time=info.date_time)
+            zi.compress_type = info.compress_type
+            dst.writestr(zi, data)
+        for path, body in new_parts.items():
+            dst.writestr(path, body)
+    return out.getvalue(), True
+
+
 def _sanitize_package_bytes(raw: bytes, _depth: int = 0) -> tuple[bytes, bool]:
     """Rewrite an OOXML package (zip) to remove two classes of defect that make
     PowerPoint flag the file as damaged, recursing into embedded OOXML parts.
@@ -317,6 +452,9 @@ def _sanitize_package_bytes(raw: bytes, _depth: int = 0) -> tuple[bytes, bool]:
             elif fname.endswith(".xml"):
                 data, preset_changed = _fix_preset_aliases(data)
                 changed = changed or preset_changed
+                if "slide" in fname:   # slides/layouts/masters/notesSlides
+                    data, xfrm_changed = _fix_degenerate_shape_xfrms(data)
+                    changed = changed or xfrm_changed
                 if "charts/chart" in fname:
                     data, axis_changed = _fix_chart_value_axis_titles(data)
                     changed = changed or axis_changed
@@ -329,17 +467,21 @@ def _sanitize_package_bytes(raw: bytes, _depth: int = 0) -> tuple[bytes, bool]:
 
 
 def sanitize_pptx(pptx_path: str) -> bool:
-    """Repair two classes of latent defect in a .pptx in place: OPC-violating
-    directory entries (from PptxGenJS chart workbooks) and invalid preset
-    geometry names (e.g. prst="oval"). Both make PowerPoint show the spurious
-    'PowerPoint found a problem with content / repaired and removed it' dialog.
-    Returns True if the file was modified. Safe and idempotent — a clean file
-    is left untouched.
+    """Repair latent defects in a .pptx in place that make PowerPoint show the
+    spurious 'PowerPoint found a problem with content / repaired and removed it'
+    dialog (python-pptx and LibreOffice tolerate them all, so they never surface
+    in our renders): OPC-violating directory entries (PptxGenJS chart workbooks),
+    invalid preset geometry names (e.g. prst="oval"), chart value-axis title
+    rotation, orphan chart axIds, zero/negative-area shape extents (straight
+    lines), and a theme part shared by more than one master. Returns True if the
+    file was modified. Safe and idempotent — a clean file is left untouched.
     """
     try:
         with open(pptx_path, "rb") as f:
             raw = f.read()
         cleaned, changed = _sanitize_package_bytes(raw)
+        cleaned, theme_changed = _split_shared_master_themes(cleaned)
+        changed = changed or theme_changed
         if changed:
             with open(pptx_path, "wb") as f:
                 f.write(cleaned)
