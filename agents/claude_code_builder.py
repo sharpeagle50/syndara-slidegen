@@ -1131,6 +1131,11 @@ bullets is WRONG. You MUST generate the visual. This is non-negotiable.
                 final_result = getattr(message, "result", None) or getattr(message, "content", None) or ""
                 cost = getattr(message, "total_cost_usd", None)
                 usage = getattr(message, "usage", None) or {}
+                try:
+                    from .base import report_exact_cost
+                    report_exact_cost(_label, cost)   # exact, cache-aware; per-run sink
+                except Exception:
+                    pass
                 print(
                     f"[{_label}] DONE {elapsed:.0f}s · turns={message.num_turns} "
                     f"· tools={_tool_count} · cost=${cost or '?'} "

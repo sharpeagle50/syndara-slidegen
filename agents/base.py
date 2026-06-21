@@ -11,6 +11,60 @@ from typing import Optional
 
 import anthropic
 import httpx
+import contextvars
+
+
+# ── Per-run cost/usage capture ───────────────────────────────────────────────
+# A context-scoped sink the orchestrator (web_runner) opens around a generation
+# run. Every API call reports its token usage here, and the agentic builder
+# reports its exact total_cost_usd. asyncio.to_thread propagates the context
+# into agent worker threads, and each concurrent run/task gets its own copy, so
+# capture is both complete and per-run isolated. This module only COLLECTS usage
+# (no pricing) — turning tokens into dollars lives in the private layer.
+_cost_sink: "contextvars.ContextVar[Optional[list]]" = contextvars.ContextVar(
+    "syndara_cost_sink", default=None
+)
+
+
+def cost_capture_begin() -> None:
+    """Open a fresh cost-capture sink in the current context (one per run)."""
+    _cost_sink.set([])
+
+
+def cost_capture_entries() -> list[dict]:
+    """Return everything reported since cost_capture_begin() (empty if unopened)."""
+    sink = _cost_sink.get()
+    return list(sink) if sink is not None else []
+
+
+def _report_usage(model: str, usage) -> None:
+    sink = _cost_sink.get()
+    if sink is None or usage is None:
+        return
+    sink.append({
+        "kind": "usage",
+        "model": model,
+        "input_tokens": int(getattr(usage, "input_tokens", 0) or 0),
+        "output_tokens": int(getattr(usage, "output_tokens", 0) or 0),
+        "cache_creation_input_tokens": int(getattr(usage, "cache_creation_input_tokens", 0) or 0),
+        "cache_read_input_tokens": int(getattr(usage, "cache_read_input_tokens", 0) or 0),
+        "server_tool_use": {
+            "web_search_requests": int(
+                getattr(getattr(usage, "server_tool_use", None), "web_search_requests", 0) or 0
+            ),
+        },
+    })
+
+
+def report_exact_cost(label: str, usd) -> None:
+    """Record an exact dollar cost (the agentic builder's total_cost_usd)."""
+    sink = _cost_sink.get()
+    if sink is None or usd is None:
+        return
+    try:
+        sink.append({"kind": "exact", "label": label, "usd": float(usd)})
+    except (TypeError, ValueError):
+        pass
 
 
 def _keepalive_socket_options() -> list[tuple]:
@@ -165,6 +219,10 @@ def _retry_api_call(fn, *, label: str, model: str):
         try:
             raw = fn()
             _log_ratelimit(raw.headers, label, model)
+            try:
+                _report_usage(model, raw.parse().usage)
+            except Exception:
+                pass  # cost capture must never break the API call
             return raw
         except anthropic.RateLimitError as e:
             retry_after = None
