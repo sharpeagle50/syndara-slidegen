@@ -1094,6 +1094,8 @@ bullets is WRONG. You MUST generate the visual. This is non-negotiable.
         max_words_per_slide=outline.get("max_words_per_slide") or 20,
         visual_motif=visual_motif_text,
     )
+    from .base import STYLE_RULE
+    sys_prompt += STYLE_RULE
 
     options = ClaudeAgentOptions(
         mcp_servers={"pptx": pptx_mcp},

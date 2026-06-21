@@ -420,6 +420,23 @@ def _split_shared_master_themes(raw: bytes) -> tuple[bytes, bool]:
     return out.getvalue(), True
 
 
+def _strip_em_dashes_in_runs(data: bytes) -> tuple[bytes, bool]:
+    """Replace Unicode dashes inside <a:t> text runs (visible slide text + speaker
+    notes) with dash-free punctuation — the deterministic backstop for the few
+    em dashes the model emits despite the style rule. Only edits text inside
+    <a:t>, and only Unicode dashes, so markup/attributes/ASCII are never touched.
+    """
+    if not any(d in data for d in (b"\xe2\x80\x94", b"\xe2\x80\x93", b"\xe2\x80\x95")):
+        return data, False
+    from ..agents.base import strip_em_dashes
+    text = data.decode("utf-8", "replace")
+    new = re.sub(r"<a:t>(.*?)</a:t>",
+                 lambda m: "<a:t>" + strip_em_dashes(m.group(1)) + "</a:t>",
+                 text, flags=re.S)
+    nb = new.encode("utf-8")
+    return nb, nb != data
+
+
 def _sanitize_package_bytes(raw: bytes, _depth: int = 0) -> tuple[bytes, bool]:
     """Rewrite an OOXML package (zip) to remove two classes of defect that make
     PowerPoint flag the file as damaged, recursing into embedded OOXML parts.
@@ -455,6 +472,8 @@ def _sanitize_package_bytes(raw: bytes, _depth: int = 0) -> tuple[bytes, bool]:
                 if "slide" in fname:   # slides/layouts/masters/notesSlides
                     data, xfrm_changed = _fix_degenerate_shape_xfrms(data)
                     changed = changed or xfrm_changed
+                    data, dash_changed = _strip_em_dashes_in_runs(data)
+                    changed = changed or dash_changed
                 if "charts/chart" in fname:
                     data, axis_changed = _fix_chart_value_axis_titles(data)
                     changed = changed or axis_changed

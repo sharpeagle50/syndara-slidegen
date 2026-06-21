@@ -13,7 +13,7 @@ from __future__ import annotations
 import re
 import time
 
-from .base import BaseAgent
+from .base import BaseAgent, STYLE_RULE, strip_em_dashes
 
 
 SLIDE_PLANNER_SYSTEM = """You are the Syndara Slide Content Researcher.
@@ -275,12 +275,12 @@ def slide_range_for(target: int) -> tuple[int, int]:
 class SlidePlannerAgent(BaseAgent):
     # Research loop needs web tools — that's the whole point of this stage.
     allowed_tool_names = ["web_search", "web_fetch"]
-    system_prompt = SLIDE_PLANNER_SYSTEM
+    system_prompt = SLIDE_PLANNER_SYSTEM + STYLE_RULE
 
     def _apply_max_words(self, max_words: int):
         self.system_prompt = SLIDE_PLANNER_SYSTEM.replace(
             "{max_words_per_slide}", str(max_words)
-        )
+        ) + STYLE_RULE
 
     def plan(
         self,
@@ -563,7 +563,7 @@ depict and the builder will create a suitable alternative diagram.
         if image_urls:
             print(f"[SlidePlannerAgent] found {len(image_urls)} web image references", flush=True)
         return {
-            "markdown": md,
+            "markdown": strip_em_dashes(md),
             "sources": sources,
             "image_urls": image_urls,
             "module_position": mod_pos,

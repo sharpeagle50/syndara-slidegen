@@ -104,6 +104,50 @@ def report_exact_cost(label: str, usd) -> None:
         pass
 
 
+# ── Punctuation style: kill the em-dash "AI tell" ────────────────────────────
+# A system-prompt rule (appended to every content agent) asks the model to vary
+# its punctuation rather than swap em dashes for hyphens; strip_em_dashes is the
+# deterministic backstop for the stragglers the model still emits. It targets
+# ONLY the Unicode dashes (em U+2014, en U+2013, horizontal bar U+2015) — never
+# the ASCII hyphen — so URLs, file paths, and code are never altered.
+STYLE_RULE = (
+    "\n\nPUNCTUATION STYLE (required): Write with varied, natural punctuation. "
+    "Never use em dashes. Do not lean on hyphens as a substitute either. Prefer "
+    "commas, periods, colons, or rephrasing the sentence, mixed naturally so no "
+    "single punctuation mark dominates."
+)
+
+_UNICODE_DASHES = "—–―"
+
+
+def strip_em_dashes(text):
+    """Replace Unicode dashes with varied, dash-free punctuation. Best-effort
+    cleanup for the few the model emits despite STYLE_RULE; only touches em/en
+    dashes (prose), so ASCII content (URLs, paths, code) is left intact."""
+    if not isinstance(text, str) or not any(d in text for d in _UNICODE_DASHES):
+        return text
+    t = re.sub(r"(\d)\s*[—–―]\s*(\d)", r"\1-\2", text)   # 5–10 -> 5-10
+    t = re.sub(r"\s*[—–―]\s+", ", ", t)                  # clause/parenthetical -> comma
+    t = re.sub(r"\s+[—–―]\s*", ", ", t)
+    for d in _UNICODE_DASHES:                                            # any remaining tight dash -> hyphen
+        t = t.replace(d, "-")
+    t = re.sub(r",\s*,", ", ", t)                                       # tidy artifacts
+    t = re.sub(r",\s*([.;:!?])", r"\1", t)
+    return t
+
+
+def strip_em_dashes_deep(obj):
+    """Apply strip_em_dashes to every string value in a nested dict/list
+    (e.g. an exercise or assessment payload). Keys are left unchanged."""
+    if isinstance(obj, str):
+        return strip_em_dashes(obj)
+    if isinstance(obj, list):
+        return [strip_em_dashes_deep(x) for x in obj]
+    if isinstance(obj, dict):
+        return {k: strip_em_dashes_deep(v) for k, v in obj.items()}
+    return obj
+
+
 def _keepalive_socket_options() -> list[tuple]:
     """TCP keepalive options so a long-idle connection (e.g. the ~4-5 min the
     planner waits on a single non-streaming call) isn't silently dropped by a
