@@ -37,12 +37,13 @@ def cost_capture_entries() -> list[dict]:
     return list(sink) if sink is not None else []
 
 
-def _report_usage(model: str, usage) -> None:
+def _report_usage(label: str, model: str, usage) -> None:
     sink = _cost_sink.get()
     if sink is None or usage is None:
         return
     sink.append({
         "kind": "usage",
+        "stage": label or "",
         "model": model,
         "input_tokens": int(getattr(usage, "input_tokens", 0) or 0),
         "output_tokens": int(getattr(usage, "output_tokens", 0) or 0),
@@ -56,13 +57,34 @@ def _report_usage(model: str, usage) -> None:
     })
 
 
+def report_usage(label: str, model: str, usage) -> None:
+    """Public: report token usage from a direct (non-_retry_api_call) Anthropic
+    call. No-op when no run sink is open; never raises."""
+    try:
+        _report_usage(label, model, usage)
+    except Exception:
+        pass
+
+
+def report_tts_usage(chars: int, model: str) -> None:
+    """Report OpenAI TTS character usage (priced separately in the private
+    layer). No-op when no run sink is open; never raises."""
+    sink = _cost_sink.get()
+    if sink is None:
+        return
+    try:
+        sink.append({"kind": "tts", "stage": "tts", "model": model, "chars": int(chars or 0)})
+    except (TypeError, ValueError):
+        pass
+
+
 def report_exact_cost(label: str, usd) -> None:
     """Record an exact dollar cost (the agentic builder's total_cost_usd)."""
     sink = _cost_sink.get()
     if sink is None or usd is None:
         return
     try:
-        sink.append({"kind": "exact", "label": label, "usd": float(usd)})
+        sink.append({"kind": "exact", "stage": "builder", "label": label, "usd": float(usd)})
     except (TypeError, ValueError):
         pass
 
@@ -220,7 +242,7 @@ def _retry_api_call(fn, *, label: str, model: str):
             raw = fn()
             _log_ratelimit(raw.headers, label, model)
             try:
-                _report_usage(model, raw.parse().usage)
+                _report_usage(label, model, raw.parse().usage)
             except Exception:
                 pass  # cost capture must never break the API call
             return raw

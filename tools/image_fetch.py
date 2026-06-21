@@ -122,6 +122,11 @@ async def search_and_fetch_image(query: str, out_path: str) -> dict:
         )
     except Exception as e:
         return _empty_result(error=f"Search API error: {e}")
+    try:
+        from ..agents.base import report_usage
+        report_usage("image_search", "claude-haiku-4-5-20251001", resp.usage)
+    except Exception:
+        pass
 
     url = None
     for block in resp.content:
