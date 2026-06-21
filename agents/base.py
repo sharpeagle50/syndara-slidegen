@@ -24,11 +24,23 @@ import contextvars
 _cost_sink: "contextvars.ContextVar[Optional[list]]" = contextvars.ContextVar(
     "syndara_cost_sink", default=None
 )
+# Tags each captured entry with the module being built (None = course-level work
+# like the course planner / plan review). Set inside each module's coroutine, so
+# concurrently-built modules each tag their own costs in isolation.
+_cost_module: "contextvars.ContextVar[Optional[object]]" = contextvars.ContextVar(
+    "syndara_cost_module", default=None
+)
 
 
 def cost_capture_begin() -> None:
     """Open a fresh cost-capture sink in the current context (one per run)."""
     _cost_sink.set([])
+
+
+def cost_set_module(module) -> None:
+    """Tag subsequent captured costs with a module id (call inside the module's
+    coroutine). None = course-level / unattributed."""
+    _cost_module.set(module)
 
 
 def cost_capture_entries() -> list[dict]:
@@ -44,6 +56,7 @@ def _report_usage(label: str, model: str, usage) -> None:
     sink.append({
         "kind": "usage",
         "stage": label or "",
+        "module": _cost_module.get(),
         "model": model,
         "input_tokens": int(getattr(usage, "input_tokens", 0) or 0),
         "output_tokens": int(getattr(usage, "output_tokens", 0) or 0),
@@ -73,7 +86,8 @@ def report_tts_usage(chars: int, model: str) -> None:
     if sink is None:
         return
     try:
-        sink.append({"kind": "tts", "stage": "tts", "model": model, "chars": int(chars or 0)})
+        sink.append({"kind": "tts", "stage": "tts", "module": _cost_module.get(),
+                     "model": model, "chars": int(chars or 0)})
     except (TypeError, ValueError):
         pass
 
@@ -84,7 +98,8 @@ def report_exact_cost(label: str, usd) -> None:
     if sink is None or usd is None:
         return
     try:
-        sink.append({"kind": "exact", "stage": "builder", "label": label, "usd": float(usd)})
+        sink.append({"kind": "exact", "stage": "builder", "module": _cost_module.get(),
+                     "label": label, "usd": float(usd)})
     except (TypeError, ValueError):
         pass
 
