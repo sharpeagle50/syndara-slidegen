@@ -428,13 +428,17 @@ def _strip_em_dashes_in_runs(data: bytes) -> tuple[bytes, bool]:
     """
     if not any(d in data for d in (b"\xe2\x80\x94", b"\xe2\x80\x93", b"\xe2\x80\x95")):
         return data, False
-    from ..agents.base import strip_em_dashes
-    text = data.decode("utf-8", "replace")
-    new = re.sub(r"<a:t>(.*?)</a:t>",
-                 lambda m: "<a:t>" + strip_em_dashes(m.group(1)) + "</a:t>",
-                 text, flags=re.S)
-    nb = new.encode("utf-8")
-    return nb, nb != data
+    try:
+        from ..agents.base import strip_em_dashes
+        text = data.decode("utf-8", "replace")
+        new = re.sub(r"<a:t>(.*?)</a:t>",
+                     lambda m: "<a:t>" + strip_em_dashes(m.group(1)) + "</a:t>",
+                     text, flags=re.S)
+        nb = new.encode("utf-8")
+        return nb, nb != data
+    except Exception:
+        # Cosmetic only — must never disable the structural repairs around it.
+        return data, False
 
 
 def _sanitize_package_bytes(raw: bytes, _depth: int = 0) -> tuple[bytes, bool]:
