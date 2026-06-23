@@ -291,6 +291,7 @@ class SlidePlannerAgent(BaseAgent):
         assessment_questions: list[dict] | None = None,
         web_images: bool = False,
         max_questions: int = 2,
+        available_tools: list[str] | None = None,
     ) -> dict:
         """Return a slide-by-slide content plan (markdown) for the given outline.
 
@@ -326,6 +327,16 @@ class SlidePlannerAgent(BaseAgent):
                 f"never as filler. Fewer is fine. Mark each with **Layout:** "
                 f"`question_slide`."
             )
+        tools_clean = [t.strip() for t in (available_tools or []) if t and t.strip()]
+        if tools_clean:
+            tools_directive = (
+                f"LEARNER TOOL ACCESS: Your learners have access to these paid tools: "
+                f"{', '.join(tools_clean)}. When slides demonstrate tools or workflows, "
+                f"prefer these and assume learners can use them. Do not instruct learners to "
+                f"buy or sign up for tools outside this list."
+            )
+        else:
+            tools_directive = ""
         from datetime import date
         today = date.today().strftime("%B %d, %Y")
         user_msg = f"""Today's date is {today}. Use this to calibrate your research —
@@ -352,6 +363,8 @@ fit the material — but NEVER go outside it. Open with a title_slide and
 close with a summary_slide.
 
 {questions_directive}
+
+{tools_directive}
 
 CRITICAL — FOLLOW THE OUTPUT FORMAT EXACTLY:
 Every slide MUST have ALL of these sections in this exact order:
