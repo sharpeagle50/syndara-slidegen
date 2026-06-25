@@ -183,6 +183,12 @@ def _build_http_client() -> httpx.Client:
 # can hit Anthropic concurrently.
 _rl_mins_lock = threading.Lock()
 _rl_mins: dict[str, dict] = {}
+# Live observability (in-process, resets on restart): the latest rate-limit headroom
+# snapshot per model, plus a rolling log of 429-hit timestamps, so an owner dashboard
+# can show how close generation is running to the API ceiling while ramping up.
+from collections import deque as _deque
+_rl_latest: dict[str, dict] = {}
+_rl_429_hits = _deque(maxlen=1000)  # rolling timestamps of recent 429 hits
 
 
 def _log_ratelimit(headers, label: str, model: str) -> None:
@@ -206,16 +212,25 @@ def _log_ratelimit(headers, label: str, model: str) -> None:
             except (TypeError, ValueError):
                 return "?"
 
+        def _as_int(x):
+            try:
+                return int(x)
+            except (TypeError, ValueError):
+                return None
+
         with _rl_mins_lock:
             slot = _rl_mins.setdefault(model, {"itpm": None, "otpm": None, "rpm": None})
             for k, v in (("itpm", itpm_rem), ("otpm", otpm_rem), ("rpm", rpm_rem)):
-                try:
-                    iv = int(v) if v is not None else None
-                except (TypeError, ValueError):
-                    iv = None
+                iv = _as_int(v)
                 if iv is not None and (slot[k] is None or iv < slot[k]):
                     slot[k] = iv
             low = slot.copy()
+            _rl_latest[model] = {
+                "itpm_rem": _as_int(itpm_rem), "itpm_lim": _as_int(itpm_lim),
+                "otpm_rem": _as_int(otpm_rem), "otpm_lim": _as_int(otpm_lim),
+                "rpm_rem": _as_int(rpm_rem), "rpm_lim": _as_int(rpm_lim),
+                "at": _time.time(),
+            }
 
         print(
             f"[Ratelimit {model}] ITPM_rem={itpm_rem}/{itpm_lim} ({_pct(itpm_rem, itpm_lim)}) "
@@ -228,6 +243,26 @@ def _log_ratelimit(headers, label: str, model: str) -> None:
     except Exception as e:
         # Never let logging break a real request.
         print(f"[Ratelimit] log error: {e}", flush=True)
+
+
+def ratelimit_snapshot() -> dict:
+    """Live, in-process rate-limit observability for the owner dashboard: the latest
+    headroom (remaining/limit) per model plus counts of recent 429 hits. Best-effort
+    and resets on restart. Returns plain JSON-able data."""
+    now = _time.time()
+    with _rl_mins_lock:
+        models = {m: dict(v) for m, v in _rl_latest.items()}
+        hits = list(_rl_429_hits)
+    def _since(secs: int) -> int:
+        return sum(1 for t in hits if now - t <= secs)
+    return {
+        "models": models,
+        "hits_1m": _since(60),
+        "hits_5m": _since(300),
+        "hits_15m": _since(900),
+        "last_429_at": hits[-1] if hits else None,
+        "now": now,
+    }
 
 
 def extract_json(text: str) -> dict:
@@ -306,6 +341,11 @@ def _retry_api_call(fn, *, label: str, model: str):
                 pass  # cost capture must never break the API call
             return raw
         except anthropic.RateLimitError as e:
+            try:
+                with _rl_mins_lock:
+                    _rl_429_hits.append(_time.time())
+            except Exception:
+                pass
             retry_after = None
             if hasattr(e, "response") and e.response is not None:
                 retry_after = e.response.headers.get("retry-after")
