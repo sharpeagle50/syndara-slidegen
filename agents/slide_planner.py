@@ -616,6 +616,40 @@ depict and the builder will create a suitable alternative diagram.
         return entries
 
     @staticmethod
+    def extract_slide_intents(md: str) -> dict:
+        """Parse the plan markdown into {0-based slide index: intent string} describing
+        what each slide was PLANNED to show, so Visual QA can verify the rendered visual
+        against the plan. Text-only slides (Type 'none') are flagged so QA skips the
+        visual-accuracy check on them. Best-effort — returns {} if the plan can't be parsed."""
+        import re
+        if not md:
+            return {}
+        try:
+            headings = re.findall(r'^## Slide \d+\s*[—–-]?\s*([^\n]*)', md, flags=re.MULTILINE)
+            sections = re.split(r'^## Slide \d+', md, flags=re.MULTILINE)[1:]
+            intents: dict = {}
+            for i, section in enumerate(sections):
+                title = (headings[i] if i < len(headings) else "").strip("—– \t")
+                tmatch = re.search(r'\*\*Type:\*\*\s*([A-Za-z_]+)', section)
+                vtype = (tmatch.group(1).strip().lower() if tmatch else "none")
+                if not vtype or vtype == "none":
+                    intents[i] = (f'Planned slide title: "{title}". This is a TEXT-ONLY slide '
+                                  "with no primary visual — do NOT apply the visual-accuracy "
+                                  "check to it.")
+                    continue
+                dmatch = re.search(
+                    r'\*\*Detailed description:\*\*\s*(.+?)(?:\n\s*-\s*\*\*|\n\n|\Z)', section, re.S
+                )
+                visual = re.sub(r'\s+', ' ', dmatch.group(1)).strip() if dmatch else ""
+                if visual:
+                    intents[i] = f'Planned slide title: "{title}". Planned visual ({vtype}): {visual}'
+                else:
+                    intents[i] = f'Planned slide title: "{title}". Planned visual type: {vtype}.'
+            return intents
+        except Exception:
+            return {}
+
+    @staticmethod
     def _extract_sources(md: str) -> list[str]:
         import re
         urls = re.findall(r"https?://\S+?(?=[)\s\],]|$)", md)
