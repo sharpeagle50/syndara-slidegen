@@ -158,10 +158,18 @@ async def verify_image(intent: str, image_path: str) -> dict:
         return {"matches": True, "caption": "", "reason": "no-intent"}
     try:
         import anthropic
+        import io as _io
+        from PIL import Image
 
-        raw = Path(image_path).read_bytes()
-        ext = Path(image_path).suffix.lower()
-        media = "image/jpeg" if ext in (".jpg", ".jpeg") else "image/png"
+        # Downscale a copy just for verification — a small thumbnail is plenty to judge
+        # the subject (and "logo vs. real screenshot"), and it keeps the request tiny and
+        # fast regardless of the source image's size.
+        with Image.open(image_path) as _im:
+            _im = _im.convert("RGB")
+            _im.thumbnail((768, 768))
+            _buf = _io.BytesIO()
+            _im.save(_buf, format="JPEG", quality=85)
+        b64 = base64.standard_b64encode(_buf.getvalue()).decode()
         client = anthropic.AsyncAnthropic()
         resp = await client.messages.create(
             model=VISION_MODEL,
@@ -178,8 +186,7 @@ async def verify_image(intent: str, image_path: str) -> dict:
                     '"reason": "brief"}'
                 )},
                 {"type": "image", "source": {
-                    "type": "base64", "media_type": media,
-                    "data": base64.standard_b64encode(raw).decode(),
+                    "type": "base64", "media_type": "image/jpeg", "data": b64,
                 }},
             ]}],
         )
