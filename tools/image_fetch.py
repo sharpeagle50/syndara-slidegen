@@ -102,13 +102,20 @@ async def fetch_web_image(url: str, out_path: str, timeout: float = 20.0) -> dic
         return _empty_result(error=str(e)[:500])
 
 
+# Image search uses Sonnet 4.6, not Haiku: the web_search_20260209 dynamic-filtering tool
+# requires Opus 4.6+ / Sonnet 4.6, and a stronger model picks better image candidates (the
+# vision-verify step below rejects bad picks, so better candidates mean fewer rejections).
+# Cost is negligible here — search is a per-image fallback and the output is just a URL.
+SEARCH_MODEL = "claude-sonnet-4-6"
+
+
 async def search_and_fetch_image(query: str, out_path: str) -> dict:
     import anthropic
 
     client = anthropic.AsyncAnthropic()
     try:
         resp = await client.messages.create(
-            model="claude-haiku-4-5-20251001",
+            model=SEARCH_MODEL,
             max_tokens=1024,
             tools=[{"type": "web_search_20260209", "name": "web_search", "max_uses": 3, "allowed_callers": ["direct"]}],
             messages=[{
@@ -124,7 +131,7 @@ async def search_and_fetch_image(query: str, out_path: str) -> dict:
         return _empty_result(error=f"Search API error: {e}")
     try:
         from ..agents.base import report_usage
-        report_usage("image_search", "claude-haiku-4-5-20251001", resp.usage)
+        report_usage("image_search", SEARCH_MODEL, resp.usage)
     except Exception:
         pass
 
