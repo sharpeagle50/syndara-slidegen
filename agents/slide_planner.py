@@ -72,6 +72,17 @@ SOURCE QUALITY AND FACT-CHECKING (do this as you go, not at the end)
   find a newer authoritative source, use that one instead and discard
   the older one. Timeless material (definitions, concepts, established
   workflows) is exempt but should still be from a credible source.
+- AVAILABILITY / DEPRECATION CHECK — a product can be removed ENTIRELY, not
+  just superseded by a newer version. Before presenting any specific AI model,
+  tool, product, or service as current, available, "the latest", or recommended,
+  web_search to confirm it has NOT been deprecated, discontinued, retired,
+  suspended, or pulled as of today (e.g. "is [X] still available [current month
+  year]", "[X] discontinued OR suspended OR banned"). Do NOT rely on your own
+  knowledge of which model/tool is newest or available — that is exactly the
+  kind of fact that goes stale or post-dates your training cutoff; treat "what's
+  the latest/available X" as something to verify by search, never to recall. If
+  a tool has been pulled or restricted, do not present it as available — drop it
+  or state its real current status.
 - TOOL COVERAGE IS ABOUT EFFICACY AND ADOPTION, NOT AGE. Established
   industry standards (even years old) get full coverage — verify they're
   still current with recent sources. New tools with real traction and
