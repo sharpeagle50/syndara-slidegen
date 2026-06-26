@@ -32,9 +32,40 @@ _cost_module: "contextvars.ContextVar[Optional[object]]" = contextvars.ContextVa
 )
 
 
-def cost_capture_begin() -> None:
-    """Open a fresh cost-capture sink in the current context (one per run)."""
-    _cost_sink.set([])
+# Live in-flight cost: a global registry of currently-open run sinks keyed by job_id, so the
+# owner dashboard can price spend that is STILL accumulating (run_costs rows are only written
+# when a run finishes). Best-effort, in-process, resets on restart.
+_active_runs: dict = {}
+_active_runs_lock = threading.Lock()
+
+
+def cost_capture_begin(job_id=None, run_type: str = "") -> None:
+    """Open a fresh cost-capture sink in the current context (one per run). When job_id is
+    given, also register the sink in the live in-flight registry so the dashboard can price
+    it while it accumulates; pair with cost_unregister_run(job_id) when the run finishes."""
+    sink: list = []
+    _cost_sink.set(sink)
+    if job_id is not None:
+        with _active_runs_lock:
+            _active_runs[job_id] = {"sink": sink, "run_type": run_type, "at": _time.time()}
+
+
+def cost_unregister_run(job_id) -> None:
+    """Drop a run from the live in-flight registry (call once its cost has been persisted)."""
+    with _active_runs_lock:
+        _active_runs.pop(job_id, None)
+
+
+def active_run_sinks() -> list:
+    """Snapshot of currently-open run sinks: [{job_id, run_type, at, entries}]. `entries` is a
+    shallow copy so the caller can price it without racing the appending builder threads."""
+    with _active_runs_lock:
+        items = list(_active_runs.items())
+    return [
+        {"job_id": jid, "run_type": v.get("run_type", ""), "at": v.get("at"),
+         "entries": list(v["sink"])}
+        for jid, v in items
+    ]
 
 
 def cost_set_module(module) -> None:
