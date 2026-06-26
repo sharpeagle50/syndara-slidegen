@@ -48,16 +48,21 @@ def render_slide_png(pptx_path: str, slide_index: int, out_dir: Optional[str] = 
                     continue
                 pdf = pdfs[0]
                 png_base = str(out_path / "slide")
+                # -singlefile writes exactly "{png_base}.png" with no page-number suffix.
+                # Without it, pdftoppm zero-pads the page number to the deck's digit width
+                # (page 1 of a 26-slide deck -> "slide-01.png"), and a glob like
+                # "slide-1*.png" would miss it -> render silently fails for slides 1-9 of
+                # any deck with >=10 slides.
                 ppm = subprocess.run(
-                    ["pdftoppm", "-png", "-r", "120",
+                    ["pdftoppm", "-png", "-r", "120", "-singlefile",
                      "-f", str(slide_index + 1), "-l", str(slide_index + 1),
                      str(pdf), png_base],
                     capture_output=True, timeout=60,
                 )
                 if ppm.returncode == 0:
-                    pngs = sorted(out_path.glob(f"slide-{slide_index + 1}*.png"))
-                    if pngs:
-                        return pngs[0].read_bytes()
+                    single = out_path / "slide.png"
+                    if single.exists():
+                        return single.read_bytes()
             except (FileNotFoundError, subprocess.TimeoutExpired):
                 continue
 

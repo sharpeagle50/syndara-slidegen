@@ -36,8 +36,9 @@ def _process_image(raw_bytes: bytes, out_path: str) -> dict:
         img = img.convert("RGBA")
         img_format = "PNG"
 
-    # Strip all metadata (EXIF, IPTC, XMP) by rebuilding from raw pixel data
-    img = Image.frombytes(img.mode, img.size, img.tobytes())
+    # Metadata (EXIF/IPTC/XMP) is dropped naturally: the save() calls below never pass
+    # exif=/icc_profile=, so PIL writes pixels only. (The old frombytes() round-trip here
+    # silently rebuilt palette PNGs with an empty palette, corrupting their colors.)
 
     w, h = img.size
     shortest = min(w, h)
@@ -117,12 +118,14 @@ async def search_and_fetch_image(query: str, out_path: str) -> dict:
         resp = await client.messages.create(
             model=SEARCH_MODEL,
             max_tokens=1024,
-            tools=[{"type": "web_search_20260209", "name": "web_search", "max_uses": 3, "allowed_callers": ["direct"]}],
+            tools=[{"type": "web_search_20260209", "name": "web_search", "max_uses": 3}],
             messages=[{
                 "role": "user",
                 "content": (
                     f"Find a single high-quality image URL for: {query}\n"
-                    "Return ONLY the direct image URL (ending in .jpg, .png, .webp, etc). "
+                    "Return ONLY the direct image URL — a link that points straight at the "
+                    "image file itself, not at a webpage that contains it. Many image hosts "
+                    "(e.g. CDNs) serve images at URLs with no file extension; that is fine. "
                     "No explanation needed."
                 ),
             }],
@@ -138,7 +141,11 @@ async def search_and_fetch_image(query: str, out_path: str) -> dict:
     url = None
     for block in resp.content:
         if getattr(block, "text", None):
-            match = re.search(r'https?://[^\s<>"]+\.(?:jpg|jpeg|png|webp|gif)(?:\?[^\s<>"]*)?', block.text, re.I)
+            # Accept any URL the model returns, not just ones ending in an image
+            # extension — modern CDNs (Unsplash, Wikimedia, S3) serve images at
+            # extensionless URLs. fetch_web_image() validates the Content-Type and
+            # rejects anything that isn't actually an image.
+            match = re.search(r'https?://[^\s<>"\'`\])]+', block.text, re.I)
             if match:
                 url = match.group(0).rstrip(".,;:)]}\"'")
                 break

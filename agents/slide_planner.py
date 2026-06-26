@@ -617,34 +617,49 @@ depict and the builder will create a suitable alternative diagram.
 
     @staticmethod
     def extract_slide_intents(md: str) -> dict:
-        """Parse the plan markdown into {0-based slide index: intent string} describing
-        what each slide was PLANNED to show, so Visual QA can verify the rendered visual
-        against the plan. Text-only slides (Type 'none') are flagged so QA skips the
-        visual-accuracy check on them. Best-effort — returns {} if the plan can't be parsed."""
+        """Parse the plan markdown into {0-based RENDERED slide index: intent string}
+        describing what each slide was PLANNED to show, so Visual QA can verify the rendered
+        visual against the plan. Text-only slides (Type 'none') are flagged so QA skips the
+        visual-accuracy check on them.
+
+        Keyed by RENDERED slide order, NOT plan order: the builder splits each question_slide
+        (**Layout:** question_slide) into TWO physical slides — the question, then the same
+        content with the answer revealed — so a quiz slide's intent is emitted twice to keep
+        indices aligned with the rendered deck Visual QA actually inspects. (Without this,
+        every slide after the first quiz would be compared against the wrong slide's intent.)
+        Best-effort — returns {} if the plan can't be parsed."""
         import re
         if not md:
             return {}
         try:
-            headings = re.findall(r'^## Slide \d+\s*[—–-]?\s*([^\n]*)', md, flags=re.MULTILINE)
-            sections = re.split(r'^## Slide \d+', md, flags=re.MULTILINE)[1:]
+            headings = re.findall(r'^##\s+Slide\s+\d+\s*[—–-]?\s*([^\n]*)', md, flags=re.MULTILINE)
+            sections = re.split(r'^##\s+Slide\s+\d+', md, flags=re.MULTILINE)[1:]
             intents: dict = {}
+            render_idx = 0
             for i, section in enumerate(sections):
                 title = (headings[i] if i < len(headings) else "").strip("—– \t")
                 tmatch = re.search(r'\*\*Type:\*\*\s*([A-Za-z_]+)', section)
                 vtype = (tmatch.group(1).strip().lower() if tmatch else "none")
                 if not vtype or vtype == "none":
-                    intents[i] = (f'Planned slide title: "{title}". This is a TEXT-ONLY slide '
-                                  "with no primary visual — do NOT apply the visual-accuracy "
-                                  "check to it.")
-                    continue
-                dmatch = re.search(
-                    r'\*\*Detailed description:\*\*\s*(.+?)(?:\n\s*-\s*\*\*|\n\n|\Z)', section, re.S
-                )
-                visual = re.sub(r'\s+', ' ', dmatch.group(1)).strip() if dmatch else ""
-                if visual:
-                    intents[i] = f'Planned slide title: "{title}". Planned visual ({vtype}): {visual}'
+                    intent = (f'Planned slide title: "{title}". This is a TEXT-ONLY slide '
+                              "with no primary visual — do NOT apply the visual-accuracy "
+                              "check to it.")
                 else:
-                    intents[i] = f'Planned slide title: "{title}". Planned visual type: {vtype}.'
+                    dmatch = re.search(
+                        r'\*\*Detailed description:\*\*\s*(.+?)(?:\n\s*-\s*\*\*|\n\n|\Z)', section, re.S
+                    )
+                    visual = re.sub(r'\s+', ' ', dmatch.group(1)).strip() if dmatch else ""
+                    if visual:
+                        intent = f'Planned slide title: "{title}". Planned visual ({vtype}): {visual}'
+                    else:
+                        intent = f'Planned slide title: "{title}". Planned visual type: {vtype}.'
+                intents[render_idx] = intent
+                render_idx += 1
+                # A question_slide renders as two physical slides (question + answer reveal);
+                # both show the same planned subject, so duplicate the intent to stay aligned.
+                if re.search(r'\*\*Layout:\*\*\s*`?\s*question_slide', section, re.I):
+                    intents[render_idx] = intent
+                    render_idx += 1
             return intents
         except Exception:
             return {}
