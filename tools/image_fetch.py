@@ -76,12 +76,26 @@ def _process_image(raw_bytes: bytes, out_path: str) -> dict:
 async def fetch_web_image(url: str, out_path: str, timeout: float = 20.0) -> dict:
     import httpx
 
-    try:
-        async with httpx.AsyncClient(
-            timeout=timeout, follow_redirects=True, max_redirects=5,
-            headers={"User-Agent": USER_AGENT},
-        ) as client:
-            resp = await client.get(url)
+    # Retry a couple times on 429/503 (e.g. Wikimedia throttling us) with a short backoff
+    # that honors Retry-After — these are valid images we simply requested too fast. The
+    # Accept header nudges servers that content-negotiate to send the image, not an HTML page.
+    headers = {"User-Agent": USER_AGENT, "Accept": "image/avif,image/webp,image/png,image/*,*/*"}
+    for attempt in range(3):
+        try:
+            async with httpx.AsyncClient(
+                timeout=timeout, follow_redirects=True, max_redirects=5, headers=headers,
+            ) as client:
+                resp = await client.get(url)
+
+            if resp.status_code in (429, 503) and attempt < 2:
+                ra = resp.headers.get("retry-after", "")
+                try:
+                    delay = float(ra)
+                except ValueError:
+                    delay = 1.5 * (attempt + 1)
+                await asyncio.sleep(min(delay, 6.0))
+                continue
+
             resp.raise_for_status()
 
             ct = resp.headers.get("content-type", "")
@@ -89,18 +103,16 @@ async def fetch_web_image(url: str, out_path: str, timeout: float = 20.0) -> dic
                 return _empty_result(error="Server returned HTML instead of an image (possible hotlink protection)")
             if not ct.startswith("image/"):
                 return _empty_result(error=f"Unexpected Content-Type: {ct}")
-
-            cl = resp.headers.get("content-length")
-            if cl and int(cl) > MAX_FILE_BYTES:
-                return _empty_result(error=f"File too large ({cl} bytes, max {MAX_FILE_BYTES})")
             if len(resp.content) > MAX_FILE_BYTES:
                 return _empty_result(error=f"File too large ({len(resp.content)} bytes, max {MAX_FILE_BYTES})")
 
             return _process_image(resp.content, out_path)
 
-    except Exception as e:
-        log.warning("fetch_web_image failed for %s: %s", url, e)
-        return _empty_result(error=str(e)[:500])
+        except Exception as e:
+            log.warning("fetch_web_image failed for %s: %s", url, e)
+            return _empty_result(error=str(e)[:500])
+
+    return _empty_result(error="rate-limited (429/503) after retries")
 
 
 # Image search uses Sonnet 4.6, not Haiku: the web_search_20260209 dynamic-filtering tool
@@ -154,6 +166,143 @@ async def search_and_fetch_image(query: str, out_path: str) -> dict:
         return _empty_result(error="No image found for query")
 
     return await fetch_web_image(url, out_path)
+
+
+# ── Agentic image acquisition: page-extract, not model-guess ─────────────────────────────
+# Asking a model to recall an image URL makes it hallucinate plausible-but-dead URLs (the
+# fake ctfassets asset IDs we saw). Instead: search for candidate PAGES, fetch their real
+# HTML, and extract the actual <img>/og:image URLs from the markup — then download +
+# vision-verify, trying the next candidate on any failure. This mirrors how an agent finds
+# an image and structurally eliminates hallucinated-URL 404s.
+
+_OG_IMAGE_RES = [
+    re.compile(r'<meta[^>]+property=["\']og:image(?::secure_url)?["\'][^>]+content=["\']([^"\']+)["\']', re.I),
+    re.compile(r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:image["\']', re.I),
+]
+_IMG_SRC_RE = re.compile(r'<img\b[^>]*?\b(?:data-src|src)=["\']([^"\']+)["\']', re.I)
+_SRCSET_RE = re.compile(r'\bsrcset=["\']([^"\']+)["\']', re.I)
+
+
+def _extract_page_image_urls(html: str, base_url: str, limit: int = 8) -> list[str]:
+    """Pull real candidate image URLs from a page's raw HTML (og:image, srcset, <img>).
+    Resolves relative URLs; skips data:/svg/obvious icons. Most-representative first."""
+    from urllib.parse import urljoin
+    out: list[str] = []
+    seen: set = set()
+
+    def add(u: str):
+        u = (u or "").strip()
+        if not u or u.startswith("data:"):
+            return
+        full = urljoin(base_url, u)
+        low = full.lower()
+        if not full.startswith(("http://", "https://")):
+            return
+        if low.endswith(".svg") or "sprite" in low or "/icon" in low or "logo" in low:
+            return
+        if full in seen:
+            return
+        seen.add(full)
+        out.append(full)
+
+    for rx in _OG_IMAGE_RES:
+        for m in rx.findall(html):
+            add(m)
+    for ss in _SRCSET_RE.findall(html):
+        cands = [p.strip().split(" ")[0] for p in ss.split(",") if p.strip()]
+        if cands:
+            add(cands[-1])   # largest entry in the srcset
+    for m in _IMG_SRC_RE.findall(html):
+        add(m)
+    return out[:limit]
+
+
+async def _fetch_page_html(url: str, timeout: float = 15.0) -> str:
+    import httpx
+    try:
+        async with httpx.AsyncClient(
+            timeout=timeout, follow_redirects=True, max_redirects=5,
+            headers={"User-Agent": USER_AGENT, "Accept": "text/html,*/*"},
+        ) as client:
+            r = await client.get(url)
+        if r.status_code == 200 and "html" in r.headers.get("content-type", "").lower():
+            return r.text
+    except Exception as e:
+        log.info("page fetch failed for %s: %s", url, e)
+    return ""
+
+
+async def _search_candidate_pages(query: str, max_pages: int = 5) -> list[str]:
+    """Real candidate PAGE urls from the web_search index (not model-emitted image URLs)."""
+    import anthropic
+    client = anthropic.AsyncAnthropic()
+    urls: list[str] = []
+    try:
+        resp = await client.messages.create(
+            model=SEARCH_MODEL, max_tokens=512,
+            tools=[{"type": "web_search_20260209", "name": "web_search", "max_uses": 3}],
+            messages=[{"role": "user", "content": (
+                f"Search the web for pages that contain a real, embeddable image (screenshot or "
+                f"photo) of: {query}. Prefer official docs, product pages, reputable "
+                f"blogs/tutorials, or Wikimedia. You don't need to write an answer."
+            )}],
+        )
+        try:
+            from ..agents.base import report_usage
+            report_usage("image_page_search", SEARCH_MODEL, resp.usage)
+        except Exception:
+            pass
+        for block in resp.content:
+            if getattr(block, "type", "") == "web_search_tool_result":
+                for r in (getattr(block, "content", None) or []):
+                    u = getattr(r, "url", None) or (r.get("url") if isinstance(r, dict) else None)
+                    if u:
+                        urls.append(u)
+            elif getattr(block, "text", None):
+                urls += re.findall(r'https?://[^\s<>"\'`\])]+', block.text)
+    except Exception as e:
+        log.warning("candidate-page search failed for %r: %s", query, e)
+    seen: set = set()
+    deduped: list[str] = []
+    for u in urls:
+        u = u.rstrip('.,;:)]}"\'')
+        if u and u not in seen:
+            seen.add(u)
+            deduped.append(u)
+    return deduped[:max_pages]
+
+
+async def find_images_for_target(query: str, intent: str, out_path: str, *,
+                                 max_pages: int = 5, max_candidates: int = 12) -> dict:
+    """Agentic page-extract image finder: search pages -> fetch real HTML -> extract real
+    <img> URLs -> download + vision-verify -> first match wins (retry next candidate on any
+    failure). Returns a fetch_web_image result dict (with caption/source on success) or an
+    _empty_result. No model ever emits an image URL, so hallucinated-URL 404s can't happen."""
+    pages = await _search_candidate_pages(query, max_pages=max_pages)
+    if not pages:
+        return _empty_result(error="no candidate pages found")
+    last_error = "no usable image on candidate pages"
+    tried = 0
+    for page in pages:
+        html = await _fetch_page_html(page)
+        if not html:
+            continue
+        for img_url in _extract_page_image_urls(html, page):
+            if tried >= max_candidates:
+                return _empty_result(error=f"exhausted {max_candidates} candidates; last: {last_error}")
+            tried += 1
+            res = await fetch_web_image(img_url, out_path)
+            if not (res and res.get("success")):
+                last_error = (res or {}).get("error", last_error)
+                continue
+            v = await verify_image(intent or query, res["path"])
+            if v.get("matches"):
+                res["caption"] = v.get("caption", "")
+                res["source_page"] = page
+                res["src_url"] = img_url
+                return res
+            last_error = f"vision rejected: {v.get('reason', '')}"
+    return _empty_result(error=last_error)
 
 
 VISION_MODEL = "claude-sonnet-4-6"
@@ -268,11 +417,23 @@ async def download_plan_images(image_entries: list[dict], images_dir: str) -> di
         async with sem:
             caption = ""
             last_error = "No URL or search query provided"
+            result = None
+
+            # Attempt 0: a curated, owner-vetted image (our own reliable hosting), injected by
+            # the caller for recurring subjects (e.g. Claude UI). Pre-vetted, so trust it
+            # without a vision check.
+            curated_url = entry.get("curated_url", "")
+            if curated_url:
+                result = await fetch_web_image(curated_url, out_path)
+                if result and result.get("success"):
+                    caption = entry.get("curated_caption", "") or caption
+                else:
+                    last_error = (result or {}).get("error", last_error)
+                    result = None
 
             # Attempt 1: a direct URL from the plan, then vision-verify it.
-            result = None
             image_url = entry.get("image_url", "")
-            if image_url:
+            if (not result or not result.get("success")) and image_url:
                 await _rate_limit(image_url)
                 result = await fetch_web_image(image_url, out_path)
                 if result and result.get("success"):
@@ -285,16 +446,13 @@ async def download_plan_images(image_entries: list[dict], images_dir: str) -> di
                 elif result:
                     last_error = result.get("error", last_error)
 
-            # Attempt 2: search for one, then vision-verify it too.
+            # Attempt 2: agentic page-extract finder — search candidate pages, pull real
+            # <img> URLs from their HTML, download + vision-verify, trying the next candidate
+            # on failure. (Verification happens inside, so we don't re-verify here.)
             if (not result or not result.get("success")) and entry.get("search_query"):
-                result = await search_and_fetch_image(entry["search_query"], out_path)
+                result = await find_images_for_target(entry["search_query"], intent, out_path)
                 if result and result.get("success"):
-                    v = await verify_image(intent, result["path"])
-                    if v["matches"]:
-                        caption = v["caption"]
-                    else:
-                        last_error = f"searched image rejected by vision check: {v.get('reason', '')}"
-                        result = None
+                    caption = result.get("caption", caption)
                 elif result:
                     last_error = result.get("error", last_error)
 
