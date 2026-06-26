@@ -236,14 +236,16 @@ async def download_plan_images(image_entries: list[dict], images_dir: str) -> di
         domain = urlparse(url).netloc
         if not domain:
             return
+        import time
         async with domain_lock:
-            import time
-            now = time.monotonic()
-            last = domain_last_request.get(domain, 0.0)
-            wait = 0.5 - (now - last)
-            if wait > 0:
-                await asyncio.sleep(wait)
-            domain_last_request[domain] = time.monotonic()
+            # Reserve this domain's next slot while holding the lock, then sleep WITHOUT the
+            # lock — otherwise a 0.5s throttle on one domain serializes requests to every
+            # other domain too, defeating the MAX_CONCURRENT parallelism.
+            fire_at = max(time.monotonic(), domain_last_request.get(domain, 0.0) + 0.5)
+            domain_last_request[domain] = fire_at
+        wait = fire_at - time.monotonic()
+        if wait > 0:
+            await asyncio.sleep(wait)
 
     async def _download_one(idx: int, entry: dict) -> tuple[str, dict]:
         heading = entry.get("slide_heading", f"slide_{idx}")

@@ -20,8 +20,6 @@ COLOR_SUBTEXT = RGBColor(0xB0, 0xBE, 0xC5)  # light gray
 
 
 def _set_slide_bg(slide, color: RGBColor):
-    from pptx.oxml.ns import qn
-    from lxml import etree
     bg = slide.background
     fill = bg.fill
     fill.solid()
@@ -582,12 +580,11 @@ def extract_slide_pngs(pptx_path: str, output_dir: str) -> list[str]:
             if result.returncode != 0:
                 print(f"[extract_slide_pngs] pdftoppm failed: {result.stderr.decode()[:300]}")
                 return _fallback_slide_pngs(pptx_path, str(output_dir))
-        except FileNotFoundError:
-            print("[extract_slide_pngs] pdftoppm not found — using matplotlib fallback")
+        except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+            print(f"[extract_slide_pngs] pdftoppm unavailable ({type(e).__name__}) — using matplotlib fallback")
             return _fallback_slide_pngs(pptx_path, str(output_dir))
 
     finally:
-        import shutil
         shutil.rmtree(pdf_dir, ignore_errors=True)
 
     pngs = sorted(output_dir.glob("slide-*.png"))

@@ -40,10 +40,15 @@ def render_all_slides(pptx_path: str, out_dir: Optional[str] = None, dpi: int = 
 
     # Step 2: PDF → JPEGs via pdftoppm
     prefix = str(out_path / "slide")
-    result = subprocess.run(
-        ["pdftoppm", "-jpeg", "-r", str(dpi), str(pdf_path), prefix],
-        capture_output=True, timeout=120,
-    )
+    try:
+        result = subprocess.run(
+            ["pdftoppm", "-jpeg", "-r", str(dpi), str(pdf_path), prefix],
+            capture_output=True, timeout=120,
+        )
+    except FileNotFoundError as e:
+        raise RuntimeError("pdftoppm not found — cannot rasterize slides for QA") from e
+    except subprocess.TimeoutExpired as e:
+        raise RuntimeError("pdftoppm timed out rasterizing slides for QA") from e
     if result.returncode != 0:
         raise RuntimeError(f"pdftoppm failed: {result.stderr.decode()[:500]}")
 

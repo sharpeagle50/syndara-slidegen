@@ -206,4 +206,4 @@ def _run_matplotlib(code: str, output_path: str) -> dict:
         else:
             return {"success": False, "error": "Code executed but no file was saved."}
     except Exception:
-        return {"success": False, "error": traceback.format_exc()}
+        return {"success": False, "error": traceback.format_exc()[-1800:]}
