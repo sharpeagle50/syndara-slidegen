@@ -142,6 +142,66 @@ async def search_and_fetch_image(query: str, out_path: str) -> dict:
     return await fetch_web_image(url, out_path)
 
 
+VISION_MODEL = "claude-sonnet-4-6"
+
+
+async def verify_image(intent: str, image_path: str) -> dict:
+    """Vision check: does the downloaded image genuinely depict `intent` (and not a
+    logo, wordmark, generic branding, or an unrelated stock photo)? Returns
+    {matches, caption, reason}, where `caption` describes what the image ACTUALLY
+    shows. Fail-OPEN on technical error (keep the image) — only the model's own
+    judgment rejects an image, never an API hiccup."""
+    import base64
+    import json as _json
+
+    if not intent or not image_path:
+        return {"matches": True, "caption": "", "reason": "no-intent"}
+    try:
+        import anthropic
+
+        raw = Path(image_path).read_bytes()
+        ext = Path(image_path).suffix.lower()
+        media = "image/jpeg" if ext in (".jpg", ".jpeg") else "image/png"
+        client = anthropic.AsyncAnthropic()
+        resp = await client.messages.create(
+            model=VISION_MODEL,
+            max_tokens=400,
+            messages=[{"role": "user", "content": [
+                {"type": "text", "text": (
+                    "You are verifying an image chosen to illustrate a slide.\n"
+                    f'The slide needs an image of: "{intent}".\n'
+                    "Look at the ACTUAL image. Does it genuinely depict that subject? "
+                    "Answer NO if it is a logo, wordmark, generic branding, an unrelated "
+                    "stock photo, or otherwise not actually showing the subject.\n"
+                    'Respond with ONLY JSON: {"matches": true|false, '
+                    '"caption": "one factual sentence describing what the image actually shows", '
+                    '"reason": "brief"}'
+                )},
+                {"type": "image", "source": {
+                    "type": "base64", "media_type": media,
+                    "data": base64.standard_b64encode(raw).decode(),
+                }},
+            ]}],
+        )
+        try:
+            from ..agents.base import report_usage
+            report_usage("image_verify", VISION_MODEL, resp.usage)
+        except Exception:
+            pass
+        text = "".join(getattr(b, "text", "") or "" for b in resp.content)
+        m = re.search(r"\{.*\}", text, re.S)
+        if m:
+            d = _json.loads(m.group(0))
+            return {
+                "matches": bool(d.get("matches", True)),
+                "caption": str(d.get("caption", "")).strip(),
+                "reason": str(d.get("reason", "")).strip(),
+            }
+    except Exception as e:
+        log.warning("verify_image failed for %s: %s", image_path, e)
+    return {"matches": True, "caption": "", "reason": "verify-error"}
+
+
 async def download_plan_images(image_entries: list[dict], images_dir: str) -> dict:
     Path(images_dir).mkdir(parents=True, exist_ok=True)
     sem = asyncio.Semaphore(MAX_CONCURRENT)
@@ -168,22 +228,49 @@ async def download_plan_images(image_entries: list[dict], images_dir: str) -> di
         filename = f"web_img_{idx + 1:02d}{ext}"
         out_path = str(Path(images_dir) / filename)
 
+        # What this image is supposed to depict, used to vision-verify the fetch.
+        intent = (entry.get("search_query") or heading or entry.get("attribution") or "").strip()
+
         async with sem:
+            caption = ""
+            last_error = "No URL or search query provided"
+
+            # Attempt 1: a direct URL from the plan, then vision-verify it.
             result = None
             image_url = entry.get("image_url", "")
             if image_url:
                 await _rate_limit(image_url)
                 result = await fetch_web_image(image_url, out_path)
+                if result and result.get("success"):
+                    v = await verify_image(intent, result["path"])
+                    if v["matches"]:
+                        caption = v["caption"]
+                    else:
+                        last_error = f"direct image rejected by vision check: {v.get('reason', '')}"
+                        result = None  # fall through to search
+                elif result:
+                    last_error = result.get("error", last_error)
 
-            if (not result or not result["success"]) and entry.get("search_query"):
+            # Attempt 2: search for one, then vision-verify it too.
+            if (not result or not result.get("success")) and entry.get("search_query"):
                 result = await search_and_fetch_image(entry["search_query"], out_path)
+                if result and result.get("success"):
+                    v = await verify_image(intent, result["path"])
+                    if v["matches"]:
+                        caption = v["caption"]
+                    else:
+                        last_error = f"searched image rejected by vision check: {v.get('reason', '')}"
+                        result = None
+                elif result:
+                    last_error = result.get("error", last_error)
 
-            if not result or not result["success"]:
+            if not result or not result.get("success"):
                 return heading, {
                     "path": "", "width_px": 0, "height_px": 0, "aspect": 0.0,
                     "attribution": entry.get("attribution", ""),
+                    "caption": "",
                     "failed": True,
-                    "error": (result or {}).get("error", "No URL or search query provided"),
+                    "error": last_error,
                 }
 
             return heading, {
@@ -192,6 +279,7 @@ async def download_plan_images(image_entries: list[dict], images_dir: str) -> di
                 "height_px": result["height_px"],
                 "aspect": result["aspect"],
                 "attribution": entry.get("attribution", ""),
+                "caption": caption,
                 "failed": False, "error": "",
             }
 
