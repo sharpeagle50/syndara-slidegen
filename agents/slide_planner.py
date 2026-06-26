@@ -444,8 +444,8 @@ depict and the builder will create a suitable alternative diagram.
             )
 
         tools = [
-            {"type": "web_search_20260209", "name": "web_search", "max_uses": 30, "allowed_callers": ["direct"]},
-            {"type": "web_fetch_20260209", "name": "web_fetch", "max_uses": 15, "allowed_callers": ["direct"]},
+            self.web_search_tool(max_uses=30),
+            self.web_fetch_tool(max_uses=15),
         ]
 
         t0 = time.time()

@@ -157,8 +157,8 @@ Produce the JSON verdict only. No commentary outside the JSON."""
 
         messages = [{"role": "user", "content": user_msg}]
 
-        # Use built-in web search
-        tools = [{"type": "web_search_20260209", "name": "web_search", "max_uses": 25, "allowed_callers": ["direct"]}]
+        # Use built-in web search (version auto-selected for the model)
+        tools = [self.web_search_tool(max_uses=25)]
 
         try:
             final_text, _ = self.run_tool_loop(
@@ -232,42 +232,7 @@ EXERCISES:
 Produce JSON: {{"status": "approved"|"revise", "feedback": "...", "issues": ["unverified_tool", "stale_command", ...]}}"""
 
         messages = [{"role": "user", "content": user_msg}]
-        tools = [{"type": "web_search_20260209", "name": "web_search", "max_uses": 10, "allowed_callers": ["direct"]}]
-
-        try:
-            final_text, _ = self.run_tool_loop(
-                messages=messages,
-                tools=tools,
-                tool_handlers={},
-                max_tokens=2000,
-            )
-        except Exception:
-            response = self.call(messages, max_tokens=2000)
-            final_text = response.content[0].text if response.content else ""
-
-        return self._parse_simple_verdict(final_text)
-
-    def review_assessment(self, assessment_content: str, cycle: int = 1) -> dict:
-        """Review assessment for quality, clarity, and rubric completeness."""
-        user_msg = f"""Review cycle {cycle}. Review this assessment.
-
-Use web_search to verify every tool name, feature, command, or factual claim in the questions
-and answer options. Incorrect answer keys are especially damaging — verify correct answers.
-
-Check that:
-1. MC questions test specific tool knowledge (not just concepts)
-2. Scenario tasks require practical application
-3. Rubric criteria are specific and measurable
-4. Answers are unambiguous and factually correct
-5. All referenced tools and features actually exist today
-
-ASSESSMENT:
-{assessment_content}
-
-Produce JSON: {{"status": "approved"|"revise", "feedback": "...", "issues": ["wrong_answer", "unverified_tool", ...]}}"""
-
-        messages = [{"role": "user", "content": user_msg}]
-        tools = [{"type": "web_search_20260209", "name": "web_search", "max_uses": 10, "allowed_callers": ["direct"]}]
+        tools = [self.web_search_tool(max_uses=10)]
 
         try:
             final_text, _ = self.run_tool_loop(

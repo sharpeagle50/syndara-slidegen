@@ -442,6 +442,29 @@ class BaseAgent:
         )
         self.skill_content = load_skill("practicality_mandate")
 
+    # Dynamic-filtering web tools (web_search_20260209 / web_fetch_20260209) require
+    # Opus 4.6+ / Sonnet 4.6 / Fable 5. On a smaller or older model — e.g. if SYNDARA_MODEL
+    # is set to Haiku 4.5 to cut cost — those versions 400 on every call, so we fall back to
+    # the basic variants. Selecting the version from self.model keeps the model overridable
+    # without silently breaking web research.
+    _DYNAMIC_WEBTOOL_MODELS = (
+        "claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6",
+        "claude-sonnet-4-6", "claude-fable-5", "claude-mythos-5",
+    )
+
+    def _supports_dynamic_webtools(self) -> bool:
+        return any(self.model.startswith(m) for m in self._DYNAMIC_WEBTOOL_MODELS)
+
+    def web_search_tool(self, *, max_uses: int = 5) -> dict:
+        """web_search server-tool definition with the right version for self.model."""
+        v = "web_search_20260209" if self._supports_dynamic_webtools() else "web_search_20250305"
+        return {"type": v, "name": "web_search", "max_uses": max_uses}
+
+    def web_fetch_tool(self, *, max_uses: int = 5) -> dict:
+        """web_fetch server-tool definition with the right version for self.model."""
+        v = "web_fetch_20260209" if self._supports_dynamic_webtools() else "web_fetch_20250910"
+        return {"type": v, "name": "web_fetch", "max_uses": max_uses}
+
     def _enforce_tools(self, tools: list[dict]) -> list[dict]:
         """Filter tool definitions to only allowed tools."""
         return [t for t in tools if t["name"] in self.allowed_tool_names]
