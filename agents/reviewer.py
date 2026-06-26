@@ -96,6 +96,11 @@ class ReviewerAgent(BaseAgent):
     # Structurally enforced: NO write tools
     allowed_tool_names = ["web_search"]
     system_prompt = REVIEWER_SYSTEM
+    # Sonnet, not the Opus default: the reviewer is a plan-grounded fact-check (a checker,
+    # not learner-facing output), and Sonnet 4.6 is strong at web-search verification. The
+    # model-aware web_search_tool() picks web_search_20260209 for Sonnet 4.6, so the swap is
+    # safe. (Opus-tier reasoning isn't needed to catch drift from an already-cited plan.)
+    model = "claude-sonnet-4-6"
 
     def review_slides(self, slide_content: list[dict], cycle: int = 1,
                       revision_feedback: str = "", plan_context: dict | None = None) -> dict:

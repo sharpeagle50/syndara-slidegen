@@ -488,7 +488,14 @@ depict and the builder will create a suitable alternative diagram.
         # Enforce the deck-length band: one corrective retry if the plan
         # landed outside it, then accept whatever we have (warn, don't fail).
         planned = len(re.findall(r"^##\s+Slide\s+\d+", md, re.MULTILINE))
-        if planned and not (slide_lo <= planned <= slide_hi) and isinstance(msgs, list):
+        # Only pay for a full-plan regeneration (Opus, 128k max_tokens) when the count is
+        # MEANINGFULLY out of band — a near-miss is imperceptible (every slide's content is
+        # the same quality; only the deck length nudges slightly off the creator's loose
+        # target). Asymmetric tolerance: generous on overshoot (a slightly long deck is
+        # benign) but tight on undershoot, since too few slides can under-cover the material.
+        BAND_LOW_SLOP = 1
+        BAND_HIGH_SLOP = 3
+        if planned and not (slide_lo - BAND_LOW_SLOP <= planned <= slide_hi + BAND_HIGH_SLOP) and isinstance(msgs, list):
             print(
                 f"[SlidePlannerAgent] plan has {planned} slides — outside the "
                 f"{slide_lo}–{slide_hi} band, requesting correction",
