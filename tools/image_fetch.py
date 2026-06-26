@@ -180,7 +180,9 @@ async def verify_image(intent: str, image_path: str) -> dict:
                     f'The slide needs an image of: "{intent}".\n'
                     "Look at the ACTUAL image. Does it genuinely depict that subject? "
                     "Answer NO if it is a logo, wordmark, generic branding, an unrelated "
-                    "stock photo, or otherwise not actually showing the subject.\n"
+                    "stock photo, or otherwise not actually showing the subject. But answer "
+                    "YES if it genuinely depicts the subject, even if it is not a perfect, "
+                    "official, or high-resolution example.\n"
                     'Respond with ONLY JSON: {"matches": true|false, '
                     '"caption": "one factual sentence describing what the image actually shows", '
                     '"reason": "brief"}'
@@ -235,8 +237,17 @@ async def download_plan_images(image_entries: list[dict], images_dir: str) -> di
         filename = f"web_img_{idx + 1:02d}{ext}"
         out_path = str(Path(images_dir) / filename)
 
-        # What this image is supposed to depict, used to vision-verify the fetch.
-        intent = (entry.get("search_query") or heading or entry.get("attribution") or "").strip()
+        # What this image is supposed to depict, used to vision-verify the fetch. Combine
+        # the DESCRIPTIVE signals (search query + slide heading) only — never the generic
+        # "slide_N" placeholder (meaningless) or the attribution (a source, not a subject).
+        # If there's no real intent, verification is skipped rather than judged against a
+        # junk string (which would spuriously reject good images).
+        _intent_parts = []
+        for _p in (entry.get("search_query", ""), entry.get("slide_heading", "")):
+            _p = (_p or "").strip()
+            if _p and not re.match(r"(?i)^slide[ _-]?\d+$", _p):
+                _intent_parts.append(_p)
+        intent = " — ".join(dict.fromkeys(_intent_parts))  # dedupe, keep order
 
         async with sem:
             caption = ""
