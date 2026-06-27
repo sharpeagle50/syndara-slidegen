@@ -73,13 +73,15 @@ def _process_image(raw_bytes: bytes, out_path: str) -> dict:
     }
 
 
-async def fetch_web_image(url: str, out_path: str, timeout: float = 20.0) -> dict:
+async def fetch_web_image(url: str, out_path: str, timeout: float = 20.0, referer: str = "") -> dict:
     import httpx
 
     # Retry a couple times on 429/503 (e.g. Wikimedia throttling us) with a short backoff
     # that honors Retry-After — these are valid images we simply requested too fast. The
     # Accept header nudges servers that content-negotiate to send the image, not an HTML page.
-    headers = {"User-Agent": USER_AGENT, "Accept": "image/avif,image/webp,image/png,image/*,*/*"}
+    base_headers = {"User-Agent": USER_AGENT, "Accept": "image/avif,image/webp,image/png,image/*,*/*"}
+    headers = dict(base_headers)
+    referer_tried = False
     for attempt in range(3):
         try:
             async with httpx.AsyncClient(
@@ -94,6 +96,14 @@ async def fetch_web_image(url: str, out_path: str, timeout: float = 20.0) -> dic
                 except ValueError:
                     delay = 1.5 * (attempt + 1)
                 await asyncio.sleep(min(delay, 6.0))
+                continue
+
+            # Hotlink protection: many CDNs 401/403 a request that carries no Referer. Retry ONCE
+            # with the source page as Referer. The first attempt is byte-for-byte unchanged, so this
+            # can only recover a fetch that already failed — it never regresses a working one.
+            if resp.status_code in (401, 403) and referer and not referer_tried and attempt < 2:
+                referer_tried = True
+                headers = {**base_headers, "Referer": referer}
                 continue
 
             resp.raise_for_status()
@@ -179,8 +189,13 @@ _OG_IMAGE_RES = [
     re.compile(r'<meta[^>]+property=["\']og:image(?::secure_url)?["\'][^>]+content=["\']([^"\']+)["\']', re.I),
     re.compile(r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:image["\']', re.I),
 ]
-_IMG_SRC_RE = re.compile(r'<img\b[^>]*?\b(?:data-src|src)=["\']([^"\']+)["\']', re.I)
-_SRCSET_RE = re.compile(r'\bsrcset=["\']([^"\']+)["\']', re.I)
+# Lazy-loading sites stash a placeholder in src= and the REAL image in a data-* attribute.
+# Pull the lazy attrs separately and add them BEFORE plain src= so the real image is tried
+# first. (<noscript><img> fallbacks need no special case — we scan raw HTML, so the plain
+# _IMG_SRC_RE already matches an <img> inside <noscript>.)
+_LAZY_SRC_RE = re.compile(r'<img\b[^>]*?\b(?:data-src|data-original|data-lazy-src|data-lazy)=["\']([^"\']+)["\']', re.I)
+_IMG_SRC_RE = re.compile(r'<img\b[^>]*?\bsrc=["\']([^"\']+)["\']', re.I)
+_SRCSET_RE = re.compile(r'\b(?:data-srcset|srcset)=["\']([^"\']+)["\']', re.I)
 
 # Image optimizer/proxy paths (Next.js, Cloudflare, imgproxy, Cloudinary fetch, etc.). These
 # wrap the real CDN original in a `url`/`u` query param and frequently 400 on a direct GET.
@@ -197,10 +212,19 @@ def _unwrap_optimizer_url(u: str) -> str:
         sp = urlsplit(u)
         if not _OPTIMIZER_PATH_RE.search(sp.path):
             return u
+        # (a) query-param form: ?url=<encoded absolute URL> (Next.js, Vercel, weserv).
         inner = (parse_qs(sp.query).get("url") or parse_qs(sp.query).get("u") or [""])[0]
         inner = unquote(inner) if inner else ""
         if inner.startswith(("http://", "https://")):
             return inner
+        # (b) path-embedded form: the original absolute URL sits in the path after the transform
+        # segment (Cloudflare /cdn-cgi/image/<opts>/https://..., Cloudinary /image/fetch/<opts>/
+        # https%3A//..., Thumbor). Only unwrap when a literal http(s):// is present after decoding,
+        # so we never guess at a scheme-less original.
+        dec = unquote(sp.path)
+        m = re.search(r'https?://\S+', dec)
+        if m:
+            return m.group(0)
     except Exception:
         pass
     return u
@@ -239,6 +263,8 @@ def _extract_page_image_urls(html: str, base_url: str, limit: int = 8) -> list[s
         cands = [p.strip().split(" ")[0] for p in ss.split(",") if p.strip()]
         if cands:
             add(cands[-1])   # largest entry in the srcset
+    for m in _LAZY_SRC_RE.findall(html):   # real lazy-loaded urls before any src= placeholder
+        add(m)
     for m in _IMG_SRC_RE.findall(html):
         add(m)
     return out[:limit]
@@ -323,7 +349,7 @@ async def find_images_for_target(query: str, intent: str, out_path: str, *,
             if tried >= max_candidates:
                 return _empty_result(error=f"exhausted {max_candidates} candidates; last: {last_error}")
             tried += 1
-            res = await fetch_web_image(img_url, out_path)
+            res = await fetch_web_image(img_url, out_path, referer=page)
             if not (res and res.get("success")):
                 last_error = (res or {}).get("error", last_error)
                 continue
