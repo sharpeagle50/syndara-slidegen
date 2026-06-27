@@ -404,22 +404,32 @@ include all labels, data values, node text, arrow directions, colors.
 """
         if web_images:
             user_msg += """
-WEB IMAGES ENABLED — you have a find_image tool. While you research and design, for any
-slide where a REAL image conveys the point better than a generated diagram, call
-find_image(subject, why) to actually fetch one. It searches the web, downloads, and
-vision-verifies the image, then returns either:
+WEB IMAGES ENABLED — you have a find_image tool. While you research and design, call
+find_image(subject, why) to fetch a REAL image for slides where one conveys the point
+better than a generated diagram. It searches, downloads, and vision-verifies the image,
+then returns either:
   - {found: true, image_id, caption} — the caption describes what the image ACTUALLY shows.
     Write that slide's content and speaker notes to MATCH the caption (so the words and the
     picture agree), and put "**Image ID:** <image_id>" on that slide.
   - {found: false, reason} — no suitable image exists; design a diagram instead.
 
-Reserve real images for things a diagram genuinely can't capture and that are well
-represented online: anatomy and other real-world objects/specimens; the actual UI of a
-specific, well-documented tool or platform (screenshots from its docs/tutorials); real
-places, people, events, or artifacts. Be precise in `subject` (name the exact tool/screen/
-structure). Use it SELECTIVELY — most slides should still be charts, flowcharts, or
-diagrams. Never write an image URL or a search query yourself, and never claim a slide has
-an image unless find_image actually returned one. Avoid watermarked stock photos.
+LEAN IN HARD FOR "HOW TO USE A TOOL/PLATFORM" CONTENT: when a slide or module teaches
+someone how to USE a specific tool or platform — its interface, where to click, what a
+screen/feature/panel looks like, getting familiar with the real product — call find_image
+for the ACTUAL interface on MOST of those slides. A real screenshot of the real product
+builds familiarity in a way a generated diagram that merely approximates the UI never can,
+so for hands-on, walk-me-through-it content, prefer real screenshots heavily, not as a rare
+exception. Be precise in `subject`: name the exact tool, screen, and state (e.g. "the Claude
+Projects page showing the New Project button", "the Claude Code terminal mid-session", "the
+Artifacts panel open beside a chat"). A diagram is the fallback only when find_image
+genuinely can't get the real screen.
+
+OTHERWISE be selective: for conceptual, data, or process content a chart/flowchart/diagram
+is usually clearer than a photo, so most non-UI slides should still be generated visuals.
+Real images also fit anatomy and other real-world objects/specimens, and real places,
+people, events, or artifacts. Never write an image URL or a search query yourself, never
+claim a slide has an image unless find_image actually returned one, and avoid watermarked
+stock photos.
 """
         else:
             user_msg += """
@@ -468,7 +478,10 @@ depict and the builder will create a suitable alternative diagram.
         # is fetched ONCE and reused; otherwise it's ephemeral for this single plan. The caller
         # owns the dir's lifecycle (it cleans it up) — see _image_dir in the return.
         _found_images: list[dict] = []
-        _img_budget = max(0, int(outline.get("image_budget", 8) or 8))
+        # Ceiling on real-image FETCHES per module (cache hits/reuse don't count). Generous so a
+        # hands-on "how to use a tool" module can show many real screens; conceptual modules
+        # naturally fetch far fewer. Cross-module reuse keeps the cost down for recurring screens.
+        _img_budget = max(0, int(outline.get("image_budget", 14) or 14))
         _img_state = {"calls": 0}
         _img_dir = None
         _img_cache: dict = {}
