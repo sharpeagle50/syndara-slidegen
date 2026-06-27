@@ -234,7 +234,7 @@ def _extract_page_image_urls(html: str, base_url: str, limit: int = 8) -> list[s
     """Pull real candidate image URLs from a page's raw HTML (og:image, srcset, <img>).
     Resolves relative URLs; skips data:/svg/obvious icons. Most-representative first."""
     from html import unescape as _unescape
-    from urllib.parse import urljoin
+    from urllib.parse import urljoin, urlsplit
     out: list[str] = []
     seen: set = set()
 
@@ -249,7 +249,12 @@ def _extract_page_image_urls(html: str, base_url: str, limit: int = 8) -> list[s
         low = full.lower()
         if not full.startswith(("http://", "https://")):
             return
-        if low.endswith(".svg") or "sprite" in low or "/icon" in low or "logo" in low:
+        # Skip vector chrome and non-image media (video/audio): a srcset/og:image can point at a
+        # .mp4 etc., which only wastes a candidate slot (the Content-Type check would reject it
+        # anyway). Test the extension on the PATH so a `?v=2` query string doesn't defeat it.
+        path_low = urlsplit(full).path.lower()
+        if (path_low.endswith((".svg", ".mp4", ".webm", ".mov", ".m4v", ".avi", ".mkv", ".ogv", ".mp3", ".pdf"))
+                or "sprite" in low or "/icon" in low or "logo" in low):
             return
         if full in seen:
             return

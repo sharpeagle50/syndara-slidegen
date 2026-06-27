@@ -671,19 +671,29 @@ class BaseAgent:
             # Execute each tool call
             tool_results = []
             for tu in tool_uses:
-                self._check_tool_call(tu.name)
-                handler = tool_handlers.get(tu.name)
-                tool_start = _time.time()
-                if not handler:
-                    result = {"error": f"No handler for tool {tu.name}"}
+                if tu.name not in self.allowed_tool_names:
+                    # The model emitted a disallowed or malformed tool call (e.g. a stray
+                    # 'invoke name=' from a botched tool-call format). Don't raise — that would
+                    # abort the whole loop and fail the module on a single transient glitch.
+                    # Hand the model an error result so it can self-correct and keep going.
+                    print(f"[{label}]   ⚠ disallowed/unknown tool {tu.name!r}; returning error to model")
+                    result = {
+                        "error": f"Tool '{tu.name}' is not available. "
+                                 f"Use only these tools: {self.allowed_tool_names}."
+                    }
                 else:
-                    try:
-                        result = handler(**tu.input)
-                    except Exception as e:
-                        result = {"error": str(e)}
-                tool_elapsed = _time.time() - tool_start
-                if tool_elapsed > 0.05:  # skip sub-50ms noise
-                    print(f"[{label}]   ← {tu.name} returned in {tool_elapsed:.1f}s")
+                    handler = tool_handlers.get(tu.name)
+                    tool_start = _time.time()
+                    if not handler:
+                        result = {"error": f"No handler for tool {tu.name}"}
+                    else:
+                        try:
+                            result = handler(**tu.input)
+                        except Exception as e:
+                            result = {"error": str(e)}
+                    tool_elapsed = _time.time() - tool_start
+                    if tool_elapsed > 0.05:  # skip sub-50ms noise
+                        print(f"[{label}]   ← {tu.name} returned in {tool_elapsed:.1f}s")
                 tool_results.append({
                     "type": "tool_result",
                     "tool_use_id": tu.id,
