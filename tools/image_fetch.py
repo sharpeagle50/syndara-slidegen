@@ -182,10 +182,34 @@ _OG_IMAGE_RES = [
 _IMG_SRC_RE = re.compile(r'<img\b[^>]*?\b(?:data-src|src)=["\']([^"\']+)["\']', re.I)
 _SRCSET_RE = re.compile(r'\bsrcset=["\']([^"\']+)["\']', re.I)
 
+# Image optimizer/proxy paths (Next.js, Cloudflare, imgproxy, Cloudinary fetch, etc.). These
+# wrap the real CDN original in a `url`/`u` query param and frequently 400 on a direct GET.
+_OPTIMIZER_PATH_RE = re.compile(r'(?i)(/_next/image|/cdn-cgi/image|/imgproxy|/image/fetch|/_vercel/image)')
+
+
+def _unwrap_optimizer_url(u: str) -> str:
+    """If `u` is an image-optimizer/proxy URL that wraps a real absolute image URL in its
+    `url`/`u` param (e.g. `/_next/image?url=https%3A%2F%2Fcdn...png&w=1920&q=75`), return the
+    unwrapped original — the wrapper itself usually 400s on a direct fetch. Otherwise return
+    `u` unchanged. Run AFTER html-unescaping so the query string parses correctly."""
+    try:
+        from urllib.parse import urlsplit, parse_qs, unquote
+        sp = urlsplit(u)
+        if not _OPTIMIZER_PATH_RE.search(sp.path):
+            return u
+        inner = (parse_qs(sp.query).get("url") or parse_qs(sp.query).get("u") or [""])[0]
+        inner = unquote(inner) if inner else ""
+        if inner.startswith(("http://", "https://")):
+            return inner
+    except Exception:
+        pass
+    return u
+
 
 def _extract_page_image_urls(html: str, base_url: str, limit: int = 8) -> list[str]:
     """Pull real candidate image URLs from a page's raw HTML (og:image, srcset, <img>).
     Resolves relative URLs; skips data:/svg/obvious icons. Most-representative first."""
+    from html import unescape as _unescape
     from urllib.parse import urljoin
     out: list[str] = []
     seen: set = set()
@@ -194,6 +218,9 @@ def _extract_page_image_urls(html: str, base_url: str, limit: int = 8) -> list[s
         u = (u or "").strip()
         if not u or u.startswith("data:"):
             return
+        # HTML attribute values encode `&` as `&amp;`; decode before use or the query string
+        # is malformed (e.g. `?url=...&amp;w=1920` 400s). Then unwrap image-optimizer proxies.
+        u = _unwrap_optimizer_url(_unescape(u))
         full = urljoin(base_url, u)
         low = full.lower()
         if not full.startswith(("http://", "https://")):
@@ -262,6 +289,11 @@ async def _search_candidate_pages(query: str, max_pages: int = 5) -> list[str]:
                 urls += re.findall(r'https?://[^\s<>"\'`\])]+', block.text)
     except Exception as e:
         log.warning("candidate-page search failed for %r: %s", query, e)
+    finally:
+        try:
+            await client.close()
+        except Exception:
+            pass
     seen: set = set()
     deduped: list[str] = []
     for u in urls:
@@ -319,6 +351,7 @@ async def verify_image(intent: str, image_path: str) -> dict:
 
     if not intent or not image_path:
         return {"matches": True, "caption": "", "reason": "no-intent"}
+    client = None
     try:
         import anthropic
         import io as _io
@@ -371,6 +404,14 @@ async def verify_image(intent: str, image_path: str) -> dict:
             }
     except Exception as e:
         log.warning("verify_image failed for %s: %s", image_path, e)
+    finally:
+        # Close the async client before the per-call event loop tears down, else its httpx
+        # cleanup fires on a closed loop ("RuntimeError: Event loop is closed").
+        if client is not None:
+            try:
+                await client.close()
+            except Exception:
+                pass
     return {"matches": True, "caption": "", "reason": "verify-error"}
 
 
