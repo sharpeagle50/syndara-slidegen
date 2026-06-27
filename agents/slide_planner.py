@@ -285,7 +285,7 @@ def slide_range_for(target: int) -> tuple[int, int]:
 
 class SlidePlannerAgent(BaseAgent):
     # Research loop needs web tools — that's the whole point of this stage.
-    allowed_tool_names = ["web_search", "web_fetch"]
+    allowed_tool_names = ["web_search", "web_fetch", "find_image"]
     system_prompt = SLIDE_PLANNER_SYSTEM + STYLE_RULE
 
     def _apply_max_words(self, max_words: int):
@@ -303,6 +303,8 @@ class SlidePlannerAgent(BaseAgent):
         web_images: bool = False,
         max_questions: int = 2,
         available_tools: list[str] | None = None,
+        curated_lookup=None,
+        image_ctx: dict | None = None,
     ) -> dict:
         """Return a slide-by-slide content plan (markdown) for the given outline.
 
@@ -402,20 +404,22 @@ include all labels, data values, node text, arrow directions, colors.
 """
         if web_images:
             user_msg += """
-WEB IMAGES ENABLED: You may use real images from the web for slides where
-a generated diagram cannot substitute. When you set Visual type to
-image/photo/screenshot, you MUST:
-1. Find the actual image URL from pages you research (official docs,
-   product pages, press materials, educational resources)
-2. Provide the direct URL in **Image URL:**
-3. Cite the source in **Attribution:**
-4. Provide a fallback search query in **Image search query:**
+WEB IMAGES ENABLED — you have a find_image tool. While you research and design, for any
+slide where a REAL image conveys the point better than a generated diagram, call
+find_image(subject, why) to actually fetch one. It searches the web, downloads, and
+vision-verifies the image, then returns either:
+  - {found: true, image_id, caption} — the caption describes what the image ACTUALLY shows.
+    Write that slide's content and speaker notes to MATCH the caption (so the words and the
+    picture agree), and put "**Image ID:** <image_id>" on that slide.
+  - {found: false, reason} — no suitable image exists; design a diagram instead.
 
-Use this SELECTIVELY — most slides should still use generated visuals
-(charts, flowcharts, diagrams). Reserve real images for: tool UI
-screenshots, photos of physical objects, complex real-world visuals,
-or premade graphs/infographics that are more accurate than anything
-the builder could generate. Avoid watermarked stock photo previews.
+Reserve real images for things a diagram genuinely can't capture and that are well
+represented online: anatomy and other real-world objects/specimens; the actual UI of a
+specific, well-documented tool or platform (screenshots from its docs/tutorials); real
+places, people, events, or artifacts. Be precise in `subject` (name the exact tool/screen/
+structure). Use it SELECTIVELY — most slides should still be charts, flowcharts, or
+diagrams. Never write an image URL or a search query yourself, and never claim a slide has
+an image unless find_image actually returned one. Avoid watermarked stock photos.
 """
         else:
             user_msg += """
@@ -454,21 +458,151 @@ depict and the builder will create a suitable alternative diagram.
                 "just make the edit directly without searching."
             )
 
+        # Phase 3: while researching, the planner can pull a REAL, vision-verified image for a
+        # slide where one conveys the point better than a diagram. find_image runs the agentic
+        # page-extract fetcher (+ optional curated lookup) and returns a caption of what the
+        # image ACTUALLY shows, so the planner writes the slide to match it. Found images are
+        # downloaded now and returned in the result for the build to use (no build-time fetch).
+        # Image acquisition context. When the caller passes image_ctx, the cache + download dir
+        # are shared across a course's modules, so a recurring subject (e.g. a Claude UI shot)
+        # is fetched ONCE and reused; otherwise it's ephemeral for this single plan. The caller
+        # owns the dir's lifecycle (it cleans it up) — see _image_dir in the return.
+        _found_images: list[dict] = []
+        _img_budget = max(0, int(outline.get("image_budget", 8) or 8))
+        _img_state = {"calls": 0}
+        _img_dir = None
+        _img_cache: dict = {}
+        _img_lock = None
+        _img_shared = False
+        if web_images:
+            if isinstance(image_ctx, dict) and image_ctx.get("dir"):
+                _img_dir = image_ctx["dir"]
+                _img_cache = image_ctx.setdefault("cache", {})
+                _img_lock = image_ctx.get("lock")
+                _img_shared = True
+            else:
+                import tempfile as _tf
+                _img_dir = _tf.mkdtemp(prefix="planimg_")
+        # Very liberal cap — find_image normally takes seconds; this only stops a true hang.
+        _IMG_FIND_TIMEOUT = 240.0
+
+        def _find_image_handler(subject: str = "", why: str = "") -> dict:
+            import asyncio as _aio, hashlib as _hl, uuid as _uuid
+            from pathlib import Path as _P
+            subject = (subject or "").strip()
+            if not subject or not _img_dir:
+                return {"found": False, "reason": "no subject given"}
+            key = subject.lower()
+
+            def _cache_get() -> dict:
+                if _img_lock:
+                    with _img_lock:
+                        return dict(_img_cache.get(key) or {})
+                return dict(_img_cache.get(key) or {})
+
+            def _cache_put(val: dict) -> None:
+                if _img_lock:
+                    with _img_lock:
+                        _img_cache[key] = val
+                else:
+                    _img_cache[key] = val
+
+            cached = _cache_get()
+            if cached.get("path"):
+                # Reuse a previously found image (possibly from another module): give it a fresh
+                # id within THIS module's plan, pointing at the shared file. Doesn't count against
+                # the fetch budget.
+                img_id = f"img_{len(_found_images) + 1:02d}"
+                _found_images.append({
+                    "id": img_id, "path": cached["path"], "caption": cached.get("caption", ""),
+                    "attribution": cached.get("attribution", ""), "source": cached.get("source", ""),
+                    "subject": subject,
+                })
+                return {"found": True, "image_id": img_id, "caption": cached.get("caption", ""),
+                        "note": "reusing an image already found for this course"}
+            if cached.get("failed"):
+                # Another module already searched this subject and genuinely found nothing —
+                # skip the full agentic fetch and don't spend this module's budget on it.
+                return {"found": False, "reason": "no suitable image exists for this subject — design a diagram"}
+
+            if _img_state["calls"] >= _img_budget:
+                return {"found": False, "reason": "image budget reached for this module — design a diagram"}
+            _img_state["calls"] += 1
+            # Unique filename per fetch so a shared dir never collides under concurrent modules.
+            out = str(_P(_img_dir) / f"img_{_hl.md5(key.encode()).hexdigest()[:6]}_{_uuid.uuid4().hex[:8]}.png")
+
+            async def _go():
+                if curated_lookup is not None:
+                    try:
+                        cm = await curated_lookup(subject, why or subject)
+                    except Exception:
+                        cm = None
+                    if cm and cm.get("url"):
+                        from ..tools.image_fetch import fetch_web_image
+                        rr = await fetch_web_image(cm["url"], out)
+                        if rr and rr.get("success"):
+                            rr["caption"] = cm.get("caption", "")
+                            rr["source_page"] = "curated"
+                            return rr
+                from ..tools.image_fetch import find_images_for_target
+                return await find_images_for_target(subject, why or subject, out)
+
+            try:
+                r = _aio.run(_aio.wait_for(_go(), timeout=_IMG_FIND_TIMEOUT))
+            except Exception as e:
+                return {"found": False, "reason": f"image search error: {str(e)[:120]}"}
+            if r and r.get("success"):
+                _cache_put({"path": r.get("path", ""), "caption": r.get("caption", ""),
+                            "attribution": r.get("attribution", ""), "source": r.get("source_page", "")})
+                img_id = f"img_{len(_found_images) + 1:02d}"
+                _found_images.append({
+                    "id": img_id, "path": r.get("path", ""), "caption": r.get("caption", ""),
+                    "attribution": r.get("attribution", ""), "source": r.get("source_page", ""),
+                    "subject": subject,
+                })
+                print(f"[SlidePlannerAgent] find_image OK: {subject!r} -> {img_id}", flush=True)
+                return {"found": True, "image_id": img_id, "caption": r.get("caption", "")}
+            # Genuine "searched and found nothing" — cache it so sibling modules don't repeat the
+            # full search. (A transient exception/timeout above is NOT cached, so it can retry.)
+            _cache_put({"failed": True})
+            return {"found": False, "reason": str((r or {}).get("error", "no suitable image found"))[:120]}
+
         tools = [
             self.web_search_tool(max_uses=30),
             self.web_fetch_tool(max_uses=15),
         ]
+        handlers: dict = {}
+        if web_images:
+            tools.append({
+                "name": "find_image",
+                "description": (
+                    "Find a REAL, vision-verified image for a slide where a real image conveys "
+                    "the point better than a generated diagram (anatomy or other real-world "
+                    "objects; the actual UI of a specific, well-documented tool/platform from "
+                    "its docs/tutorials; real places, people, events). Searches the web, "
+                    "downloads, and verifies it. Returns {found, image_id, caption} on success "
+                    "(caption = what the image ACTUALLY shows; write the slide to match it and "
+                    "put '**Image ID:** <image_id>' on the slide) or {found:false, reason} if "
+                    "nothing suitable exists (then design a diagram). Use selectively."
+                ),
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "subject": {"type": "string", "description": "Precisely what the image must show, e.g. 'the Claude Code terminal interface mid-session'."},
+                        "why": {"type": "string", "description": "Why a real image beats a diagram here (optional)."},
+                    },
+                    "required": ["subject"],
+                },
+            })
+            handlers["find_image"] = _find_image_handler
 
         t0 = time.time()
         try:
             # run_tool_loop returns (final_text, updated_messages_list).
-            # The iteration count we want is roughly half the len of that list
-            # (one user tool_result turn per assistant tool_use turn) but we
-            # don't actually need it for correctness — just a rough stat.
             final_text, msgs = self.run_tool_loop(
                 messages=[{"role": "user", "content": user_msg}],
                 tools=tools,
-                tool_handlers={},
+                tool_handlers=handlers,
                 max_tokens=128000,
                 trace_label=f"SlidePlanner.module{mod_pos}",
             )
@@ -591,12 +725,16 @@ depict and the builder will create a suitable alternative diagram.
 
         sources = self._extract_sources(md)
         image_urls = SlidePlannerAgent._extract_image_urls(md) if web_images else []
-        if image_urls:
-            print(f"[SlidePlannerAgent] found {len(image_urls)} web image references", flush=True)
+        if web_images:
+            print(f"[SlidePlannerAgent] {len(_found_images)} image(s) found during planning; "
+                  f"{len(image_urls)} image slide(s) in plan", flush=True)
         return {
             "markdown": strip_em_dashes(md),
             "sources": sources,
             "image_urls": image_urls,
+            "found_images": _found_images,
+            "_image_dir": _img_dir,            # caller cleans this up (unless shared)
+            "_image_dir_shared": _img_shared,  # True = a course-shared dir; caller must NOT clean per-module
             "module_position": mod_pos,
             "_iterations": iterations,
             "_latency_seconds": round(latency, 1),
@@ -609,9 +747,13 @@ depict and the builder will create a suitable alternative diagram.
         headings = re.findall(r'^(## Slide \d+[^\n]*)', md, flags=re.MULTILINE)
         sections = re.split(r'^## Slide \d+', md, flags=re.MULTILINE)[1:]
         for heading, section in zip(headings, sections):
+            # Lenient: tolerate model format drift (missing bold, case) but require the colon
+            # so prose like "the image ID system" never false-matches.
+            id_match = re.search(r'(?i)\*{0,2}\s*image\s+id\s*:\s*\*{0,2}\s*([A-Za-z0-9_\-]+)', section)
+            image_id = id_match.group(1).strip() if id_match else ""
+            if image_id.lower() in ("", "n/a", "none"):
+                image_id = ""
             type_match = re.search(r'\*\*Type:\*\*\s*(image|photo|screenshot)', section, re.IGNORECASE)
-            if not type_match:
-                continue
             url_match = re.search(r'\*\*Image URL:\*\*\s*(https?://\S+)', section)
             url = url_match.group(1).rstrip(".,);") if url_match else ""
             if url.lower() == "n/a":
@@ -624,9 +766,12 @@ depict and the builder will create a suitable alternative diagram.
             attribution = attr_match.group(1).strip() if attr_match else ""
             if attribution.lower() == "n/a":
                 attribution = ""
-            if url or query:
+            # An image slide references a planner-found image (Phase 3, by Image ID) OR — legacy
+            # path — declares an image Type with a URL/query to fetch at build time.
+            if image_id or (type_match and (url or query)):
                 entries.append({
                     "slide_heading": heading.strip(),
+                    "image_id": image_id,
                     "image_url": url,
                     "search_query": query,
                     "attribution": attribution,
