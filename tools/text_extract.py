@@ -15,10 +15,11 @@ import io
 from pathlib import Path
 
 # Plain-text extensions read directly; binary formats need an optional parser.
+# .ipynb is plain JSON, so it needs no extra dependency (handled inline below).
 TEXT_EXTS = ("txt", "md", "csv", "tsv")
-SUPPORTED_EXTS = set(TEXT_EXTS) | {"pdf", "docx", "xlsx"}
+SUPPORTED_EXTS = set(TEXT_EXTS) | {"pdf", "docx", "pptx", "xlsx", "ipynb"}
 
-_SUPPORTED_LABEL = "PDF, DOCX, TXT, MD, CSV, Excel"
+_SUPPORTED_LABEL = "PDF, DOCX, PPTX, TXT, MD, CSV, Excel, Jupyter (.ipynb)"
 
 
 class UnsupportedFileType(ValueError):
@@ -34,6 +35,8 @@ def extract_text(data: bytes, filename: str) -> str:
     ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
     if ext in TEXT_EXTS:
         return data.decode("utf-8", errors="replace")
+    if ext == "ipynb":
+        return _extract_ipynb(data)
     if ext == "pdf":
         try:
             from pypdf import PdfReader
@@ -48,6 +51,12 @@ def extract_text(data: bytes, filename: str) -> str:
             raise RuntimeError("DOCX support needs python-docx — install with: pip install 'syndara-slidegen[context]'")
         doc = Document(io.BytesIO(data))
         return "\n\n".join(p.text for p in doc.paragraphs if p.text.strip())
+    if ext == "pptx":
+        try:
+            from pptx import Presentation
+        except ImportError:
+            raise RuntimeError("PPTX support needs python-pptx — install with: pip install 'syndara-slidegen[context]'")
+        return _extract_pptx(Presentation(io.BytesIO(data)))
     if ext == "xlsx":
         try:
             from openpyxl import load_workbook
@@ -67,6 +76,52 @@ def extract_text(data: bytes, filename: str) -> str:
         wb.close()
         return "\n\n".join(sheets)
     raise UnsupportedFileType(f"Unsupported file type: .{ext}. Supported: {_SUPPORTED_LABEL}.")
+
+
+def _extract_ipynb(data: bytes) -> str:
+    """Flatten a Jupyter notebook (.ipynb, plain JSON) to text for grounding: markdown/raw
+    cells as-is, code cells fenced. Cell outputs are skipped — they're often large or binary
+    (images, tracebacks) and we want the authored content, not the run artifacts."""
+    import json
+    try:
+        nb = json.loads(data.decode("utf-8", errors="replace"))
+    except ValueError:
+        raise UnsupportedFileType("Unsupported file type: .ipynb (not valid notebook JSON).")
+    parts: list[str] = []
+    for cell in nb.get("cells", []) or []:
+        src = cell.get("source", "")
+        text = ("".join(src) if isinstance(src, list) else str(src or "")).strip()
+        if not text:
+            continue
+        parts.append(f"```python\n{text}\n```" if cell.get("cell_type") == "code" else text)
+    return "\n\n".join(parts)
+
+
+def _extract_pptx(prs) -> str:
+    """Flatten a PowerPoint deck to text for grounding: per slide, the text from every
+    shape (titles, bullets, text boxes), tables row-by-row (tab-separated), and any
+    speaker notes. Shapes are emitted in document order; empty slides are skipped."""
+    slides: list[str] = []
+    for i, slide in enumerate(prs.slides, start=1):
+        parts: list[str] = []
+        for shape in slide.shapes:
+            if shape.has_text_frame:
+                text = "\n".join(p.text for p in shape.text_frame.paragraphs if p.text.strip())
+                if text.strip():
+                    parts.append(text)
+            if shape.has_table:
+                for row in shape.table.rows:
+                    cells = [c.text for c in row.cells]
+                    if any(c.strip() for c in cells):
+                        parts.append("\t".join(cells))
+        notes = ""
+        if slide.has_notes_slide:
+            notes = (slide.notes_slide.notes_text_frame.text or "").strip()
+        if notes:
+            parts.append(f"[Notes] {notes}")
+        if parts:
+            slides.append(f"[Slide {i}]\n" + "\n".join(parts))
+    return "\n\n".join(slides)
 
 
 def extract_text_from_path(path: str | Path) -> str:

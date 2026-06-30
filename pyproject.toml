@@ -22,8 +22,8 @@ dependencies = [
 [project.optional-dependencies]
 # Extra diagram renderers (graphviz flowcharts, SVG rasterization).
 diagrams = ["graphviz", "cairosvg"]
-# Rich text extraction for --context-file / --context-dir (PDF, Word, Excel).
-context = ["pypdf>=4.0", "python-docx>=1.0", "openpyxl>=3.1"]
+# Rich text extraction for --context-file / --context-dir (PDF, Word, PowerPoint, Excel).
+context = ["pypdf>=4.0", "python-docx>=1.0", "python-pptx>=0.6.21", "openpyxl>=3.1"]
 
 [project.scripts]
 deckgen = "deckgen.cli:main"
