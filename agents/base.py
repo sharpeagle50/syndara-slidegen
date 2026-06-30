@@ -123,6 +123,20 @@ def report_tts_usage(chars: int, model: str) -> None:
         pass
 
 
+def report_video_usage(renders: int = 1, seconds: float = 0.0, *, test: bool = False) -> None:
+    """Report avatar/presenter video render usage (priced separately in the
+    private layer). No-op when no run sink is open; never raises."""
+    sink = _cost_sink.get()
+    if sink is None:
+        return
+    try:
+        sink.append({"kind": "video", "stage": "video", "module": _cost_module.get(),
+                     "renders": int(renders or 0), "seconds": float(seconds or 0.0),
+                     "test": bool(test)})
+    except (TypeError, ValueError):
+        pass
+
+
 def report_exact_cost(label: str, usd) -> None:
     """Record an exact dollar cost (the agentic builder's total_cost_usd)."""
     sink = _cost_sink.get()
@@ -294,6 +308,20 @@ def ratelimit_snapshot() -> dict:
         "last_429_at": hits[-1] if hits else None,
         "now": now,
     }
+
+
+def text_from_response(response) -> str:
+    """Join the text blocks of a Messages response, skipping non-text blocks.
+
+    Necessary for adaptive-thinking models (e.g. Sonnet 5), whose response content
+    starts with a thinking block — so ``content[0].text`` would raise. Returns "" for
+    an empty/None response.
+    """
+    return "".join(
+        getattr(b, "text", "") or ""
+        for b in (getattr(response, "content", None) or [])
+        if getattr(b, "type", "") == "text"
+    )
 
 
 def extract_json(text: str) -> dict:
@@ -483,6 +511,18 @@ class BaseAgent:
         "claude-sonnet-5", "claude-sonnet-4-6", "claude-fable-5", "claude-mythos-5",
     )
 
+    # Sonnet 5 turns adaptive thinking ON by default (effort=high) and returns a
+    # leading thinking block, whereas these agents were tuned for non-thinking
+    # Sonnet 4.6. Default to disabling it so text extraction + cost stay unchanged;
+    # a subclass that benefits from reasoning (e.g. the Reviewer) sets this True.
+    # Only Sonnet 5 is touched — Opus defaults to thinking-off, and Fable/Mythos 5
+    # reject {type:"disabled"} (thinking is always on there).
+    adaptive_thinking: bool = False
+
+    def _maybe_disable_thinking(self, kwargs: dict) -> None:
+        if self.model.startswith("claude-sonnet-5") and not self.adaptive_thinking:
+            kwargs["thinking"] = {"type": "disabled"}
+
     def _supports_dynamic_webtools(self) -> bool:
         return any(self.model.startswith(m) for m in self._DYNAMIC_WEBTOOL_MODELS)
 
@@ -537,6 +577,7 @@ class BaseAgent:
             "system": self._build_system(extra_system),
             "messages": messages,
         }
+        self._maybe_disable_thinking(kwargs)
         if allowed_tools:
             kwargs["tools"] = allowed_tools
         raw = _retry_api_call(
@@ -600,6 +641,7 @@ class BaseAgent:
                 "system": self._build_system(extra_system),
                 "messages": call_messages,
             }
+            self._maybe_disable_thinking(create_kwargs)
             if allowed_tools:
                 create_kwargs["tools"] = allowed_tools
             if _container_id:

@@ -185,6 +185,9 @@ class VisualQAAgent:
                 raw = _retry_api_call(
                     lambda: self.client.messages.with_raw_response.create(
                         model=self.model,
+                        # Sonnet 5 defaults adaptive thinking ON; this class parses
+                        # content[0].text directly (not via BaseAgent), so keep it off.
+                        thinking={"type": "disabled"},
                         max_tokens=8192,
                         system=system_prompt,
                         messages=[{
@@ -274,6 +277,8 @@ class VisualQAAgent:
         raw = _retry_api_call(
             lambda: self.client.messages.with_raw_response.create(
                 model=self.model,
+                # Sonnet 5 defaults adaptive thinking ON; parses content[0].text directly.
+                thinking={"type": "disabled"},
                 max_tokens=8192,
                 messages=[{"role": "user", "content": instruction}],
             ),

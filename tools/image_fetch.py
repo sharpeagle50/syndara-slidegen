@@ -139,7 +139,9 @@ async def search_and_fetch_image(query: str, out_path: str) -> dict:
     try:
         resp = await client.messages.create(
             model=SEARCH_MODEL,
-            max_tokens=1024,
+            # Headroom for Sonnet 5's adaptive thinking (on by default) — thinking
+            # tokens share this budget, so a tight cap could truncate before the URL.
+            max_tokens=4096,
             tools=[{"type": "web_search_20260209", "name": "web_search", "max_uses": 3}],
             messages=[{
                 "role": "user",
@@ -297,7 +299,8 @@ async def _search_candidate_pages(query: str, max_pages: int = 5) -> list[str]:
     urls: list[str] = []
     try:
         resp = await client.messages.create(
-            model=SEARCH_MODEL, max_tokens=512,
+            # max_tokens has headroom for Sonnet 5 adaptive thinking (shares the budget).
+            model=SEARCH_MODEL, max_tokens=4096,
             tools=[{"type": "web_search_20260209", "name": "web_search", "max_uses": 3}],
             messages=[{"role": "user", "content": (
                 f"Search the web for pages that contain a real, embeddable image (screenshot or "
@@ -400,7 +403,8 @@ async def verify_image(intent: str, image_path: str) -> dict:
         client = anthropic.AsyncAnthropic()
         resp = await client.messages.create(
             model=VISION_MODEL,
-            max_tokens=400,
+            # Headroom for Sonnet 5 adaptive thinking (shares the budget) before the JSON verdict.
+            max_tokens=3000,
             messages=[{"role": "user", "content": [
                 {"type": "text", "text": (
                     "You are verifying an image chosen to illustrate a slide.\n"

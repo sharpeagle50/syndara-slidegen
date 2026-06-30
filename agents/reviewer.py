@@ -1,7 +1,7 @@
 """Reviewer Agent: critiques content, fact-checks with web search. NO write tools."""
 from __future__ import annotations
 import json
-from .base import BaseAgent, extract_json
+from .base import BaseAgent, extract_json, text_from_response
 
 REVIEWER_SYSTEM = """You are the Syndara Reviewer + Fact-Checker. You evaluate course
 content against the content standard AND aggressively fact-check every factual claim
@@ -101,6 +101,11 @@ class ReviewerAgent(BaseAgent):
     # model-aware web_search_tool() picks web_search_20260209 for Sonnet 5, so the swap is
     # safe. (Opus-tier reasoning isn't needed to catch drift from an already-cited plan.)
     model = "claude-sonnet-5"
+    # Keep Sonnet 5's adaptive thinking ON here — fact-checking against web search
+    # genuinely benefits from reasoning. run_tool_loop already filters content by
+    # block type, so the leading thinking block is handled; the .call() fallback
+    # below extracts text the same way.
+    adaptive_thinking = True
 
     def review_slides(self, slide_content: list[dict], cycle: int = 1,
                       revision_feedback: str = "", plan_context: dict | None = None) -> dict:
@@ -174,7 +179,7 @@ Produce the JSON verdict only. No commentary outside the JSON."""
             )
         except Exception:
             response = self.call(messages, max_tokens=24000)
-            final_text = response.content[0].text if response.content else ""
+            final_text = text_from_response(response)
 
         return self._parse_verdict(final_text)
 
@@ -248,7 +253,7 @@ Produce JSON: {{"status": "approved"|"revise", "feedback": "...", "issues": ["un
             )
         except Exception:
             response = self.call(messages, max_tokens=2000)
-            final_text = response.content[0].text if response.content else ""
+            final_text = text_from_response(response)
 
         return self._parse_simple_verdict(final_text)
 
@@ -269,7 +274,7 @@ Produce JSON: {{"status": "approved"|"revise", "feedback": "...", "issues": ["un
                 )}],
                 max_tokens=16000,
             )
-            retry_text = response.content[0].text if response.content else ""
+            retry_text = text_from_response(response)
             return extract_json(retry_text)
         except Exception:
             pass
@@ -301,7 +306,7 @@ Produce JSON: {{"status": "approved"|"revise", "feedback": "...", "issues": ["un
                     )}],
                     max_tokens=1000,
                 )
-                retry_text = response.content[0].text if response.content else ""
+                retry_text = text_from_response(response)
                 verdict = extract_json(retry_text)
                 if verdict.get("status") in ("approved", "revise"):
                     return verdict
