@@ -519,8 +519,13 @@ class BaseAgent:
     # reject {type:"disabled"} (thinking is always on there).
     adaptive_thinking: bool = False
 
-    def _maybe_disable_thinking(self, kwargs: dict) -> None:
-        if self.model.startswith("claude-sonnet-5") and not self.adaptive_thinking:
+    # Models where thinking is always on and {type:"disabled"} is rejected (400).
+    _ALWAYS_ON_THINKING = ("claude-fable-5", "claude-mythos-5", "claude-mythos-preview")
+
+    def _maybe_disable_thinking(self, kwargs: dict, *, force: bool = False) -> None:
+        if self.model.startswith(self._ALWAYS_ON_THINKING):
+            return  # can't disable on these — leave thinking on
+        if force or (self.model.startswith("claude-sonnet-5") and not self.adaptive_thinking):
             kwargs["thinking"] = {"type": "disabled"}
 
     def _supports_dynamic_webtools(self) -> bool:
@@ -568,8 +573,15 @@ class BaseAgent:
         tools: list[dict] = None,
         max_tokens: int = 8192,
         extra_system: str = "",
+        disable_thinking: bool = False,
     ) -> anthropic.types.Message:
-        """Make a Claude API call with tool permission enforcement."""
+        """Make a Claude API call with tool permission enforcement.
+
+        ``disable_thinking=True`` forces thinking off for this call even on a
+        subclass with ``adaptive_thinking=True`` — for mechanical follow-ups
+        (e.g. reformatting a verdict to JSON) that don't benefit from reasoning
+        and whose small budgets thinking could otherwise truncate.
+        """
         allowed_tools = self._enforce_tools(tools or [])
         kwargs = {
             "model": self.model,
@@ -577,7 +589,7 @@ class BaseAgent:
             "system": self._build_system(extra_system),
             "messages": messages,
         }
-        self._maybe_disable_thinking(kwargs)
+        self._maybe_disable_thinking(kwargs, force=disable_thinking)
         if allowed_tools:
             kwargs["tools"] = allowed_tools
         raw = _retry_api_call(

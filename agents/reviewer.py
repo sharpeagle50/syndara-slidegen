@@ -249,10 +249,12 @@ Produce JSON: {{"status": "approved"|"revise", "feedback": "...", "issues": ["un
                 messages=messages,
                 tools=tools,
                 tool_handlers={},
-                max_tokens=2000,
+                # Headroom: adaptive thinking (on for this agent) shares max_tokens
+                # with the verdict, so a tight cap could truncate the JSON.
+                max_tokens=16000,
             )
         except Exception:
-            response = self.call(messages, max_tokens=2000)
+            response = self.call(messages, max_tokens=16000)
             final_text = text_from_response(response)
 
         return self._parse_simple_verdict(final_text)
@@ -273,6 +275,9 @@ Produce JSON: {{"status": "approved"|"revise", "feedback": "...", "issues": ["un
                     '"global_feedback": "..."}. Output ONLY the JSON.\n\nREVIEW:\n' + text[:20000]
                 )}],
                 max_tokens=16000,
+                # Mechanical reformat — no reasoning needed; disable thinking so it
+                # can't eat the budget (this agent otherwise keeps thinking on).
+                disable_thinking=True,
             )
             retry_text = text_from_response(response)
             return extract_json(retry_text)
@@ -305,6 +310,9 @@ Produce JSON: {{"status": "approved"|"revise", "feedback": "...", "issues": ["un
                         "Output only the JSON, nothing else.\n\nVERDICT:\n" + text[:4000]
                     )}],
                     max_tokens=1000,
+                    # Mechanical reformat — disable thinking so the small budget isn't
+                    # consumed by reasoning (this agent otherwise keeps thinking on).
+                    disable_thinking=True,
                 )
                 retry_text = text_from_response(response)
                 verdict = extract_json(retry_text)
