@@ -30,9 +30,9 @@ class DiagramGenAgent(BaseAgent):
     allowed_tool_names = ["code_exec"]
     system_prompt = DIAGRAM_GEN_SYSTEM
     # Sonnet, not the Opus default: this emits boilerplate matplotlib code (a mechanical
-    # task Sonnet 4.6 handles well), and the rendered chart is checked downstream by Visual
+    # task Sonnet 5 handles well), and the rendered chart is checked downstream by Visual
     # QA's inaccurate_visual category — so a bad diagram is caught rather than shipped.
-    model = "claude-sonnet-4-6"
+    model = "claude-sonnet-5"
 
     def run(self, description: str, output_path: str) -> dict:
         """

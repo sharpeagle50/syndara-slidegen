@@ -125,11 +125,11 @@ async def fetch_web_image(url: str, out_path: str, timeout: float = 20.0, refere
     return _empty_result(error="rate-limited (429/503) after retries")
 
 
-# Image search uses Sonnet 4.6, not Haiku: the web_search_20260209 dynamic-filtering tool
-# requires Opus 4.6+ / Sonnet 4.6, and a stronger model picks better image candidates (the
+# Image search uses Sonnet 5, not Haiku: the web_search_20260209 dynamic-filtering tool
+# requires Opus 4.6+ / Sonnet 4.6+, and a stronger model picks better image candidates (the
 # vision-verify step below rejects bad picks, so better candidates mean fewer rejections).
 # Cost is negligible here — search is a per-image fallback and the output is just a URL.
-SEARCH_MODEL = "claude-sonnet-4-6"
+SEARCH_MODEL = "claude-sonnet-5"
 
 
 async def search_and_fetch_image(query: str, out_path: str) -> dict:
@@ -368,7 +368,7 @@ async def find_images_for_target(query: str, intent: str, out_path: str, *,
     return _empty_result(error=last_error)
 
 
-VISION_MODEL = "claude-sonnet-4-6"
+VISION_MODEL = "claude-sonnet-5"
 
 
 async def verify_image(intent: str, image_path: str) -> dict:

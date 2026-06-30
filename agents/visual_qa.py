@@ -50,7 +50,7 @@ BATCH_SIZE = 6
 class VisualQAAgent:
     """Uses Claude Sonnet vision to inspect rendered slides for visual defects."""
 
-    model = "claude-sonnet-4-6"
+    model = "claude-sonnet-5"
 
     def __init__(self):
         from anthropic import Anthropic
