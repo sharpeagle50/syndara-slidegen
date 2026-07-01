@@ -137,6 +137,20 @@ def report_video_usage(renders: int = 1, seconds: float = 0.0, *, test: bool = F
         pass
 
 
+def report_gpu_usage(gpu: str, seconds: float) -> None:
+    """Report GPU compute time (wall-clock seconds) for notebook test-execution on
+    a Modal GPU, priced per-second in the private layer. No-op when no run sink is
+    open; never raises."""
+    sink = _cost_sink.get()
+    if sink is None:
+        return
+    try:
+        sink.append({"kind": "gpu", "stage": "notebook_gpu", "module": _cost_module.get(),
+                     "gpu": str(gpu or "").upper(), "seconds": float(seconds or 0.0)})
+    except (TypeError, ValueError):
+        pass
+
+
 def report_exact_cost(label: str, usd) -> None:
     """Record an exact dollar cost (the agentic builder's total_cost_usd)."""
     sink = _cost_sink.get()
