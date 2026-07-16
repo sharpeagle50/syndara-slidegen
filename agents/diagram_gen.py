@@ -56,4 +56,16 @@ Remember: Syndara color scheme, no plt.show(), no plt.savefig(). Output only Pyt
         if not code:
             return {"success": False, "error": "No code generated"}
 
-        return run_diagram_code(code, output_path)
+        result = run_diagram_code(code, output_path)
+        # Capture the actual generated code + outcome so the trace can show WHY a
+        # diagram was flagged downstream (e.g. no label rotation → overlapping labels).
+        try:
+            from .base import report_gen_event
+            report_gen_event(
+                "chart",
+                "diagram render " + ("ok" if result.get("success") else "FAILED"),
+                {"desc": description[:200], "code": code[:4000], "error": result.get("error")},
+            )
+        except Exception:
+            pass
+        return result

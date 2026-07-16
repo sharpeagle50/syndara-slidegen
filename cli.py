@@ -145,7 +145,7 @@ def _build_review_qa(outline: dict, work_dir: Path, style: str, qa_passes: int,
     if watermark_info:
         from .tools.watermark import apply_watermark
         _log(f"applying watermark ({watermark_info['mode']})...")
-        apply_watermark(pptx_path, watermark_info["image_path"], watermark_info["mode"])
+        apply_watermark(pptx_path, watermark_info["image_path"], watermark_info["mode"], watermark_info.get("scale", 1.0))
 
     return pptx_path
 

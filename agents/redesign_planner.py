@@ -10,7 +10,7 @@ from __future__ import annotations
 import base64
 import time
 
-from .base import BaseAgent
+from .base import BaseAgent, visual_directive
 
 
 REDESIGN_PLANNER_SYSTEM = """You are the Syndara Slide Redesign Planner.
@@ -83,14 +83,16 @@ summary_slide | section_divider | agenda_slide | quote_slide>
   position/size it.>
 - **Image URL:** <Write 'N/A' — source images are provided separately.>
 - **Image search query:** <Write 'N/A' for redesign.>
-- **Data source:** <'From source deck' for all slides. Write 'N/A' if
-  type is 'none'.>
+- **Data source:** <'From source deck' for all slides — EXCEPT a slide that carries an
+  approved content update supplied with a [source: URL] below: put that URL here so it
+  prints on the slide as the fact's citation. Write 'N/A' if type is 'none' AND the slide
+  has no approved-update source.>
 - **Attribution:** <Write 'N/A' for redesign.>
 - **Teaching purpose:** <One sentence: what does this visual teach that
   text alone cannot? Write 'N/A' if type is 'none'.>
 
-**On-slide text** (EXACT text from the source slide — same words, max
-{max_words_per_slide} words total):
+**On-slide text** (EXACT text from the source slide — same words, kept
+concise; preserve what the source communicates, don't pad):
 - <exact text item 1>
 - <exact text item 2>
 
@@ -141,6 +143,10 @@ class RedesignPlannerAgent(BaseAgent):
         max_words_per_slide: int = 20,
         previous_plan: dict | None = None,
         feedback: str = "",
+        content_deltas: list[dict] | None = None,
+        creator_guidance: str = "",
+        added_sources: list[str] | None = None,
+        visual_level=None,
     ) -> dict:
         """Produce a redesign slide plan from extracted deck content."""
         self._apply_max_words(max_words_per_slide)
@@ -216,8 +222,52 @@ INSTRUCTIONS:
 - Choose better layouts and visual elements where the current design
   is weak (e.g. text-heavy bullets → charts, tables, flowcharts)
 - For slides with embedded images, use Visual type "image"
-- Max {max_words_per_slide} words of on-slide text per slide
+- Keep on-slide text concise and legible — don't cram; a text-forward slide may carry more than a visual one
+- Overall layout lean for this redesign: {visual_directive(visual_level)}
 """
+
+        _delta_sources: list[str] = []
+        if content_deltas:
+            _dl = []
+            for d in content_deltas:
+                si = int(d.get("slide_index", 0) or 0) + 1
+                if d.get("kind") == "remove":
+                    _dl.append(f'- Slide {si}: REMOVE this outdated content: "{d.get("original", "")}"')
+                else:
+                    _src = (d.get("source") or "").strip()
+                    _srctag = f'  [source: {_src}]' if _src else ''
+                    _dl.append(f'- Slide {si}: REPLACE "{d.get("original", "")}" WITH "{d.get("replacement", "")}"  ({d.get("reason", "")}){_srctag}')
+                    if _src:
+                        _delta_sources.append(_src)
+            user_text += (
+                "\n\nAPPROVED CONTENT UPDATES — the creator approved these because the original is "
+                "OUTDATED. Apply each one exactly on the named slide; preserve ALL OTHER on-slide "
+                "text verbatim as instructed above (do not make any other content changes):\n"
+                + "\n".join(_dl)
+            )
+
+        if creator_guidance:
+            user_text += ("\n\nCREATOR GUIDANCE (from course feedback — apply where it fits THIS deck; "
+                          f"ignore parts that don't):\n{creator_guidance}")
+
+        # References policy: cite ONLY the new material we introduce (modernized facts + newly-added
+        # images); leave every existing slide's citations and any pre-existing references untouched.
+        _new_sources = list(dict.fromkeys([s for s in (_delta_sources + list(added_sources or [])) if s]))
+        if _new_sources:
+            user_text += (
+                "\n\nCITE THE NEW CONTENT — you are introducing new, sourced material into this deck "
+                "(the approved updates above, and any newly-added images). Apply the SAME citation "
+                "policy a fresh build uses, but ONLY to this NEW content; leave every existing slide's "
+                "citations and any pre-existing references entry untouched.\n"
+                "1. For each approved REPLACE update that has a [source: URL], set that slide's "
+                "**Data source** field to that URL so it prints on the slide as the fact's citation.\n"
+                "2. References slide: if the source deck already ENDS with a references/sources slide, "
+                "ADD these new sources to it as new lines, keeping ALL existing entries exactly as they "
+                "are. If the deck has NO references slide, ADD one plain references slide at the very end "
+                "listing ONLY these new sources (one per line). Never remove, reorder, or rewrite an "
+                "existing reference entry.\n\n"
+                "NEW SOURCES TO ADD:\n" + "\n".join(f"- {s}" for s in _new_sources)
+            )
 
         if is_revise:
             prev_md = previous_plan.get("markdown", "") if isinstance(previous_plan, dict) else str(previous_plan)

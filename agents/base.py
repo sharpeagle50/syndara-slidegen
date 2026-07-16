@@ -11,6 +11,8 @@ from typing import Optional
 
 import anthropic
 import httpx
+
+from .. import keyring
 import contextvars
 
 
@@ -123,16 +125,18 @@ def report_tts_usage(chars: int, model: str) -> None:
         pass
 
 
-def report_video_usage(renders: int = 1, seconds: float = 0.0, *, test: bool = False) -> None:
-    """Report avatar/presenter video render usage (priced separately in the
-    private layer). No-op when no run sink is open; never raises."""
+def report_video_usage(renders: int = 1, seconds: float = 0.0, *, test: bool = False,
+                       is_custom: bool = False) -> None:
+    """Report avatar/presenter video render usage (priced separately in the private layer). No-op
+    when no run sink is open; never raises. `test` (watermarked) and `is_custom` (creator's own
+    Synthesia key/quota) renders cost us nothing and are priced to $0 downstream."""
     sink = _cost_sink.get()
     if sink is None:
         return
     try:
         sink.append({"kind": "video", "stage": "video", "module": _cost_module.get(),
                      "renders": int(renders or 0), "seconds": float(seconds or 0.0),
-                     "test": bool(test)})
+                     "test": bool(test), "is_custom": bool(is_custom)})
     except (TypeError, ValueError):
         pass
 
@@ -163,6 +167,60 @@ def report_exact_cost(label: str, usd) -> None:
         pass
 
 
+def report_build_summary(label: str, detail: dict) -> None:
+    """Record what the slide-builder actually did in a run — tool usage, repeated
+    actions, turns, timing — so the generation trace can show where it spun on the
+    wrong approach or burned its whole tool budget. Priced-run accounting ignores
+    this kind. No-op when no run sink is open; never raises."""
+    sink = _cost_sink.get()
+    if sink is None:
+        return
+    try:
+        sink.append({"kind": "build", "stage": "builder", "module": _cost_module.get(),
+                     "label": label, "detail": dict(detail or {})})
+    except (TypeError, ValueError):
+        pass
+
+
+def report_gen_event(phase: str, event: str, detail=None) -> None:
+    """Record a generic generation-trace event — a chart's generated code, an
+    image-verify decision, a reformat retry (the model fumbled its output format),
+    etc. Reported to the run sink; web_runner drains these to the generation trace.
+    Priced-run accounting ignores this kind. No-op when no run sink is open."""
+    sink = _cost_sink.get()
+    if sink is None:
+        return
+    try:
+        sink.append({"kind": "event", "stage": str(phase), "module": _cost_module.get(),
+                     "event": str(event), "detail": dict(detail or {})})
+    except (TypeError, ValueError):
+        pass
+
+
+def _report_agent_output(label: str, model: str, msg) -> None:
+    """Verbose per-agent trace (opt-in via SYNDARA_TRACE_VERBOSE): record a truncated
+    summary of what each agent produced — TEXT OUTPUT ONLY, never inputs/images — so
+    the whole pipeline's decisions are inspectable. Reported to the run sink and
+    drained to the trace by web_runner. OFF by default (one env check, then return),
+    so normal builds store nothing extra. Never raises."""
+    if os.environ.get("SYNDARA_TRACE_VERBOSE", "").strip().lower() not in ("1", "true", "yes", "on"):
+        return
+    sink = _cost_sink.get()
+    if sink is None:
+        return
+    try:
+        text = "".join(
+            (getattr(b, "text", "") or "")
+            for b in (getattr(msg, "content", None) or [])
+            if getattr(b, "type", None) == "text"
+        )
+        sink.append({"kind": "agent", "stage": "agent", "module": _cost_module.get(),
+                     "label": label, "model": model,
+                     "stop": getattr(msg, "stop_reason", None), "output": text[:4000]})
+    except (TypeError, ValueError, AttributeError):
+        pass
+
+
 # ── Punctuation style: kill the em-dash "AI tell" ────────────────────────────
 # A system-prompt rule (appended to every content agent) asks the model to vary
 # its punctuation rather than swap em dashes for hyphens; strip_em_dashes is the
@@ -175,6 +233,60 @@ STYLE_RULE = (
     "commas, periods, colons, or rephrasing the sentence, mixed naturally so no "
     "single punctuation mark dominates."
 )
+
+# Visual-ness spectrum for slide layouts (1 = most visual … 5 = most text). The create-page slider picks
+# one of these; the chosen text is substituted INTO each planner's prompt at the {layout_lean} placeholder
+# (it becomes the deck's layout section — NOT an appended override). 3 = Neutral is the default.
+#   1 = the original visual-first philosophy (pre-7ba50ab), verbatim.
+#   4 = the original text-forward base wording (the pre-slider "very text-leaning" default).
+#   5 = one notch MORE text-forward than the base (lean text-forward throughout, fuller lines).
+#   2 = level 1 relaxed toward text; 3 = a true neutral midpoint.
+VISUAL_DIRECTIVES = {
+    1: ("Lean hard on visuals. The slide is a visual anchor, not a document: only a handful of words — key "
+        "phrases, big numbers, short labels, NOT sentences. If a slide has more than 3 short bullets or any "
+        "bullet longer than 6 words, you're doing it wrong; push ALL depth into the speaker notes. Aim for "
+        "70%+ of content slides to carry a real visual (a chart, diagram, flowchart, or image), not just the "
+        "title/summary slides — text-only bullet slides are rare exceptions. Use a table only for a small "
+        "structured comparison, and only if a chart or diagram doesn't fit. If you can replace text with a "
+        "chart, flowchart, or diagram, do it."),
+    2: ("Match the layout to the content, leaning visual. Most content slides should carry a real chart, "
+        "diagram, flowchart, or image, and the slide stays a visual anchor rather than a document. Keep "
+        "on-slide text tight: short phrases and labels, only a few short bullets, no full paragraphs. A "
+        "clean, well-structured text-forward slide (bullets, columns, or a small table) is fine where the "
+        "content is genuinely verbal or conceptual and a visual would be forced — but that's the exception, "
+        "not the default."),
+    3: ("Match the layout to the content with no bias either way. Where the content is spatial, relational, "
+        "or quantitative, use a chart, diagram, flowchart, or image; where it's verbal or conceptual, use a "
+        "clean text-forward layout (bullets, columns, or a table). Aim for a genuine balance across the deck "
+        "— neither mostly diagrams nor mostly bullets — and never a bare, unstructured wall of text."),
+    4: ("Match the layout to the content, not to a quota. Spatial, relational, or quantitative content "
+        "belongs in a diagram, chart, or table; sequential in a flow. Verbal or conceptual content — "
+        "principles, criteria, contrasts, lists a diagram would only awkwardly force — belongs in a "
+        "text-forward layout: bullets, columns, or a table, whichever fits the structure. Text-forward "
+        "slides are first-class, not a failure; reach for one whenever a slide wouldn't stand on its own "
+        "from a diagram alone. Give most content slides a strong focal element — either a visual or a "
+        "well-structured text-forward layout; what to avoid is the bare, unstructured wall of text, not "
+        "text itself. Keep diagrams strong where they genuinely fit — just stop forcing them onto ideas "
+        "that aren't visual, and vary the mix so the deck isn't diagrams and tables on repeat."),
+    5: ("Match the layout to the content. Text-forward slides are first-class — reach for a well-structured "
+        "bullet, column, or table layout for verbal or conceptual content (principles, criteria, contrasts, "
+        "lists), and text may carry fuller lines. Give most content slides a strong focal element, either a "
+        "visual or a clean text-forward layout; what to avoid is a bare, unstructured wall of text, not text "
+        "itself. Lean text-forward throughout, with one pull toward visuals: where a slide would clearly "
+        "land better as a chart, diagram, or image, use the visual instead of defaulting to bullets."),
+}
+VISUAL_DEFAULT_LEVEL = 3
+
+
+def visual_directive(level) -> str:
+    """The layout-section text for a visual-ness level (1 = most visual … 5 = most text). Substituted into
+    each planner prompt at the {layout_lean} placeholder — it IS the deck's layout guidance, not an add-on."""
+    try:
+        lvl = int(level)
+    except (TypeError, ValueError):
+        lvl = VISUAL_DEFAULT_LEVEL
+    return VISUAL_DIRECTIVES.get(lvl, VISUAL_DIRECTIVES[VISUAL_DEFAULT_LEVEL])
+
 
 _UNICODE_DASHES = "—–―"
 
@@ -409,7 +521,9 @@ def _retry_api_call(fn, *, label: str, model: str):
             raw = fn()
             _log_ratelimit(raw.headers, label, model)
             try:
-                _report_usage(label, model, raw.parse().usage)
+                _msg = raw.parse()
+                _report_usage(label, model, _msg.usage)
+                _report_agent_output(label, model, _msg)  # verbose trace; no-op unless SYNDARA_TRACE_VERBOSE
             except Exception:
                 pass  # cost capture must never break the API call
             return raw
@@ -489,6 +603,13 @@ class ToolPermissionError(Exception):
     pass
 
 
+class MaxTokensError(RuntimeError):
+    """The agent's final (no-tool) turn was cut off by max_tokens, so its output is truncated.
+    A subclass of RuntimeError so existing `except Exception` callers still catch it; callers that
+    want to distinguish a truncated CLOSING remark from a genuine mid-run failure can catch this
+    specifically (e.g. AgenticSlideBuilder, which can still save an already-complete deck)."""
+
+
 class BaseAgent:
     """
     Base class for all Syndara production agents.
@@ -507,8 +628,7 @@ class BaseAgent:
         # seconds, not eat the whole read budget. The SDK retries timeouts.
         # Custom http_client adds TCP keepalive so the long idle wait on a
         # non-streaming call isn't dropped by a router/NAT idle timeout.
-        self.client = client or anthropic.Anthropic(
-            api_key=os.environ.get("ANTHROPIC_API_KEY"),
+        self.client = client or keyring.sync_anthropic(
             timeout=httpx.Timeout(connect=15.0, read=1800.0, write=120.0, pool=120.0),
             max_retries=2,
             http_client=_build_http_client(),
@@ -571,6 +691,19 @@ class BaseAgent:
         base = self.system_prompt
         if self.skill_content:
             base += f"\n\n---\n# CONTENT STANDARD (enforce on all outputs)\n\n{self.skill_content}"
+        # With the dynamic-filtering web tools (Opus etc.), web_search runs inside a
+        # code-execution sandbox and hands results back as a JSON string. Tell the model that
+        # shape up front so it stops burning a turn rediscovering it every run ("search looks
+        # empty -> inspect the raw value -> oh it's a JSON string -> parse -> now it works").
+        # Pure guidance: it does not change what search does or which results come back.
+        if "web_search" in self.allowed_tool_names and self._supports_dynamic_webtools():
+            base += (
+                "\n\n---\n# WEB SEARCH RESULT SHAPE\n"
+                "web_search / web_fetch results are delivered into your code-execution sandbox "
+                "as a JSON STRING. Call json.loads() on it immediately to read the results — the "
+                "result is not empty; do not inspect the raw value or re-run the search to "
+                "'check the structure' first. Use code execution only to filter those results."
+            )
         if extra:
             base += f"\n\n{extra}"
         return [
@@ -727,6 +860,14 @@ class BaseAgent:
                 for b in text_blocks:
                     accumulated_text.append(b.text)
                 final_text = "\n".join(accumulated_text)
+                if response.stop_reason == "max_tokens":
+                    # Truncated mid-answer. Returning this as "complete" ships partial slide plans,
+                    # unparseable notebook JSON, or cut-off reviews that fail silently downstream
+                    # (e.g. an empty exercise that looks successful). Surface it so the caller's
+                    # error handling (retry / mark-failed) runs instead.
+                    raise MaxTokensError(
+                        f"{label}: response hit max_tokens after {len(final_text)} chars — output "
+                        f"is truncated/incomplete")
                 print(
                     f"[{label}] DONE in {iteration} iterations, "
                     f"{_time.time() - t0:.1f}s total, {len(final_text)} chars output"

@@ -50,24 +50,50 @@ YOUR JOB, in order:
 
    The plan separates "**On-slide content**" from "**Speaker notes**" for
    every slide. This is a HARD contract:
-   - "On-slide content" is what the learner SEES. MAXIMUM 20 WORDS per
-     slide — total, across all text elements combined. That means 2–3
-     short phrases or one headline + a few labels. NO sentences. NO
-     paragraphs. The slide is a VISUAL with minimal text labels, not a
-     document. Prefer a chart, flowchart, or diagram over bullets every
-     time. If a slide has more than {max_words_per_slide} words of visible text, you have
-     FAILED — delete text and replace with a visual.
+   - "On-slide content" is what the learner SEES. Follow the plan's layout and
+     text for each slide. Be concise — no more words than the point needs, and
+     not so few the slide is cryptic on its own. A visual-forward slide is a
+     VISUAL with short labels; a text-forward slide (bullets, columns, or a table)
+     carries fuller lines so it actually explains the idea. Match the plan: don't
+     force a diagram onto a slide it built as text-forward, and don't turn a
+     visual slide into paragraphs. Almost never a bare, unstructured wall of text
+     (references excepted). On text-forward slides, bold the 1–3 KEY words per
+     line in the ACCENT color (rich-text runs) for scannability — never bold whole
+     lines or every word. CREATOR'S REQUEST WINS: if the course description or
+     instructions ask for mostly-text, mostly-visual, verbose, or concise slides,
+     honor that over these defaults.
    - "Speaker notes" is what the narrator SAYS: the full in-depth prose
      teaching, examples, citations, nuance. Copy ALL of this into
      slide.addNotes() VERBATIM. Do NOT paste any of the speaker notes
      onto the slide surface. The narration is the teaching; the slide is
      the visual anchor.
-   - EXCEPTION — references/citations slides: notes must be ONE short
-     sign-off sentence like "These are the references used in this module —
-     thank you for listening!". Never read URLs, citations, or source
-     names aloud.
-   When in doubt: delete text from the slide. Add a diagram instead.
-   The speaker notes carry the content; the slide carries the visual.
+   - EXCEPTION — references/citations slides: the FIRST references slide's
+     notes are ONE short sign-off sentence like "These are the references used
+     in this module — thank you for listening!". ADDITIONAL references slides
+     get NO notes at all (call addNotes('') — no narration; they're just more
+     references). Never read URLs, citations, or source names aloud.
+   - SOURCE ON FACT SLIDES: if a slide's plan **Data source** field is NOT 'N/A',
+     render that citation text VERBATIM as a small line (~8pt, subtext color). If
+     'N/A', render nothing. Use the plan's exact wording; don't reword. It's a
+     caption/attribution, not slide body text.
+     WHERE to place it:
+       • If the cited data is shown in a CHART, GRAPH, or TABLE on the slide, put
+         the citation DIRECTLY BENEATH that chart/table (like a caption) — NOT in a
+         slide corner. (Web images likewise carry their caption directly beneath
+         the image.)
+       • Otherwise — a fact/figure stated in plain TEXT with no chart/table — place
+         it in the free CORNER, picked from which overlays are active this build
+         (each reserved-zone block appears in this prompt only when active):
+           - presenter-video tile owns bottom-LEFT (~27% W × ~28% H); watermark
+             owns bottom-RIGHT (x > 10", y > 6.5").
+           - BOTH the "PRESENTER VIDEO — RESERVED ZONE" and "WATERMARK RESERVED
+             ZONES" blocks present → TOP-RIGHT (clear of the title).
+           - ONLY the watermark block → BOTTOM-LEFT.
+           - ONLY the presenter-video block, OR NEITHER → BOTTOM-RIGHT.
+     Never let the citation enter an ACTIVE reserved zone; keep it clear of content.
+   When in doubt, follow the plan's intent: keep visual slides visual, and let
+   text-forward slides carry the words they need to make sense on their own.
+   The speaker notes carry the depth; the slide carries the point.
 2. Compose the slide deck by calling run_pptxgen_code with PptxGenJS
    JavaScript code. Each call adds slides to the in-memory presentation.
    The file is saved automatically when the build finishes. Do NOT call
@@ -100,7 +126,11 @@ YOUR JOB, in order:
        state machines, class diagrams**: make_mermaid_diagram. This is
        Mermaid's sweet spot.
      - **Icons** (for icon+text rows, grid headers, stats): make_icon.
-       Renders react-icons to PNG. Use accent-colored icons at 0.5-0.8 in.
+       Renders react-icons to PNG. Look up valid names with find_icon('concept')
+       first — don't guess. Use accent-colored icons at 0.5-0.8 in.
+       CONTRAST: the icon color must stand out against whatever is behind it —
+       NEVER a near-background color (e.g. white/very-light on a light tile), or
+       it vanishes. Default to the deck accent color on light fills.
        NEVER use emoji characters (🔒 🔍 etc.) in slide text — they are
        fixed-color, low-res, and look unprofessional. Use make_icon instead.
      - make_flowchart (graphviz) is legacy — only fall back to it if D2
@@ -364,9 +394,25 @@ ICON USAGE:
 Use make_icon to render professional vector icons (react-icons library).
 Insert at 0.5-0.8 in for inline, 1.0-1.5 in for hero. Great for
 icon+text rows, grid cell headers, stat callouts, and process steps.
-NEVER use emoji characters (🔒 🔍 💡 ⚡ etc.) anywhere in slide text or
-speaker notes — they render as fixed-color OS glyphs that look like AI
-slop. If you want an icon, use make_icon and insert the PNG.
+GET THE NAME RIGHT: call find_icon('concept') to look up REAL icon names
+(e.g. find_icon('handshake') → FaHandshake). Do NOT guess an icon_name from
+memory — a name that doesn't exist fails and costs a turn. Pick a name from
+find_icon's results and pass it, with its icon_pack, to make_icon. When a
+slide's tiles each need a distinct icon, look each one up — never fall back
+to one repeated icon, plain numbered circles, or single-LETTER initials
+(a "T" or "F" in a circle is a placeholder, not an icon) when real icons are
+a lookup away. If find_icon returns nothing that fits a concept, render the
+closest real icon — or a simple geometric mark via make_icon — but NEVER a
+lettered or numbered circle standing in for the planned icon.
+NEVER paste a Unicode symbol or icon-font glyph as an icon in slide text —
+not emoji (🔒 🔍 💡 ⚡), and not dingbat/symbol-font characters either. The
+PPTX-to-PNG renderer does not have those glyph fonts, so they come out as
+empty "tofu" boxes (blank rectangles) in the final slide. The ONLY way to
+place an icon is make_icon → insert the returned PNG.
+CONTRAST: give every icon a color that clearly stands out against whatever
+sits behind it. Never render an icon in a near-background color (e.g. a
+white or very-light icon on a light tile) — it becomes invisible. Use the
+deck accent color on light fills, and a light color only on dark fills.
 
 TEXT ROTATION:
 PptxGenJS supports `rotate` (degrees, clockwise) on any element:
@@ -436,7 +482,8 @@ HARD LIMITS:
 - Every slide with Visual type != 'none' MUST have a visual — either manual
   PptxGenJS shapes or a generated diagram/chart image. Text-only bullet
   slides when a visual was planned = failure.
-- Max {max_words_per_slide} words of visible text per slide. If you have more, delete text.
+- Keep on-slide text concise — as many words as the point needs, no filler. Visual
+  slides get short labels; text-forward slides get fuller lines. Never a dense paragraph.
 - Don't use Bash to install packages or download files. Everything you need
   is already available.
 - Do not modify files outside the provided working directory.
@@ -523,6 +570,27 @@ TEXT IN SHAPES — CRITICAL:
 - If text doesn't fit, make the shape bigger — never let it auto-shrink.
 - Minimum font size: 10pt. Never go below this.
 
+BOXES / OUTLINED CARDS — USE SPARINGLY (avoid the "everything in a rectangle" look):
+- A visible outlined box is a deliberate EMPHASIS device, not a default wrapper. Do NOT draw a
+  bordered rectangle around every bullet, heading, or text block. Plain text on the background,
+  separated by whitespace, reads cleaner and more modern — reach for an outline only to set ONE
+  element apart (e.g. a single hero callout), at most one or two boxed elements per slide.
+- NEVER nest a box in a box (this is the most common artifact): if an element already sits on a
+  filled/colored card, do NOT also put a bordered rectangle inside or around it. One frame max.
+- Bullet lists, titles, and the source/citation line should NOT be individually boxed.
+- Prefer a soft FILL (or nothing) over a visible BORDER; if content is already grouped by position,
+  it does not also need an outline.
+
+HORIZONTAL RULES / DIVIDERS — keep them clear of the text:
+- If you draw a horizontal rule or divider under a title, give it clear vertical clearance BELOW the
+  title's lowest line — it must never cut through, touch, or overlap the title text. Titles wrap to
+  two lines often; position the rule below the WRAPPED height, not the single-line height.
+- Leave a margin between the rule and whatever follows it too (a table header row, the top node of a
+  diagram, the first bullet) so the rule doesn't collide with the next element.
+- On the CONTENT master (which already has a left accent bar), a title rule should START at the right
+  edge of that accent bar and align to it — never run the rule through, across, or past the vertical
+  bar.
+
 HARD LIMITS:
 - Max {max_turns} total tool calls.
 - Only modify slides you are told to modify. Follow structural rules in
@@ -566,8 +634,21 @@ async def build_slides_with_claude_code(
     # slide (compose + chart/icon renders + self-check renders). A fixed budget
     # silently truncates large decks.
     target_slides = outline.get("slide_count") or len(outline.get("slides") or []) or 0
+    if not target_slides:
+        # In the plan-driven creator flow, slide_count/slides are empty — the authoritative count
+        # is the number of "## Slide N" entries in the approved plan markdown. Without this the
+        # budget never scales and 30-40 slide modules die on error_max_turns.
+        _plan_obj = outline.get("approved_slide_plan") or {}
+        _plan_md = _plan_obj.get("markdown", "") if isinstance(_plan_obj, dict) else (
+            _plan_obj if isinstance(_plan_obj, str) else "")
+        target_slides = _plan_md.count("\n## Slide ") + (1 if _plan_md.startswith("## Slide ") else 0)
     if target_slides:
-        max_turns = max(max_turns, int(target_slides * 2.5) + 30)
+        # ~3.5 tool calls/slide: icon- and diagram-heavy slides each spend several calls
+        # (find_icon + make_icon + code + render), so 2.5/slide starved big decks — a
+        # ~40-slide module hit the cap mid-build and was dropped entirely. Budget for the
+        # deck to FINISH; the builder stops early when done, so extra headroom costs nothing
+        # on normal modules and only spends more on the genuinely large ones.
+        max_turns = max(max_turns, int(target_slides * 3.5) + 30)
     outline_path = str(output_dir / "outline.json")
     images_dir = output_dir / "images"
     images_dir.mkdir(exist_ok=True)
@@ -691,10 +772,33 @@ Approach:
     else:
         feedback_block = ""
         if reviewer_feedback:
-            feedback_block = (
-                "\n\nPREVIOUS REVIEWER / CREATOR FEEDBACK — address these issues in this build:\n"
-                + json.dumps(reviewer_feedback, indent=2)[:3000]
-            )
+            _slides_fb = reviewer_feedback.get("slides") if isinstance(reviewer_feedback, dict) else None
+            if _slides_fb:
+                # Render as compact per-slide lines rather than dumping pretty-printed JSON and
+                # slicing it at 3000 chars — that cut mid-structure and silently dropped the later
+                # flagged slides. Cap on a whole-entry boundary with an explicit marker.
+                _fb_lines = []
+                for _s in _slides_fb:
+                    _iss = ", ".join(str(i) for i in (_s.get("issues") or [])) or "(unspecified)"
+                    _sug = (_s.get("suggestion") or "").strip()
+                    _fb_lines.append(f"- slide {_s.get('slide_index')}: {_iss}" + (f" — {_sug}" if _sug else ""))
+                    if len(_fb_lines) >= 60:
+                        _fb_lines.append(f"...({len(_slides_fb) - 60} more flagged slides — see the outline)")
+                        break
+                _gfb = (reviewer_feedback.get("global_feedback") or "").strip()
+                feedback_block = "\n\nPREVIOUS REVIEWER / CREATOR FEEDBACK — address these in this build:\n"
+                if _gfb:
+                    feedback_block += f"Overall: {_gfb}\n"
+                feedback_block += "\n".join(_fb_lines)
+            else:
+                # Non-slide-structured feedback (free text): include it, capped on a line boundary.
+                _raw = json.dumps(reviewer_feedback, indent=2)
+                if len(_raw) > 3000:
+                    _raw = _raw[:3000].rsplit("\n", 1)[0] + "\n  ...(truncated)"
+                feedback_block = (
+                    "\n\nPREVIOUS REVIEWER / CREATOR FEEDBACK — address these issues in this build:\n"
+                    + _raw
+                )
 
         max_words_per_slide = outline.get("max_words_per_slide") or 20
 
@@ -711,6 +815,20 @@ Approach:
         slide_count = plan_md.count("\n## Slide ") + (1 if plan_md.startswith("## Slide ") else 0)
         if slide_count == 0:
             slide_count = len(outline.get("slides", [])) or 40
+
+        # Presenter-video mode overlays a talking-head tile in the bottom-left corner of every
+        # slide, so the builder must leave that region clear (see storage.video.PRESENTER_TILE).
+        keepout_block = ""
+        if outline.get("presenter_keepout"):
+            keepout_block = (
+                "\n═══════════════════════════════════════════════════════════\n"
+                "PRESENTER VIDEO — RESERVED ZONE (hard layout constraint)\n"
+                "═══════════════════════════════════════════════════════════\n"
+                "A talking-head presenter video is overlaid in the BOTTOM-LEFT corner of EVERY slide.\n"
+                "Keep the bottom-left ~28% of slide WIDTH and ~30% of slide HEIGHT completely clear —\n"
+                "no text, bullets, charts, images, diagrams, or footers may sit there or they will be\n"
+                "covered. Shift on-slide content up and/or to the right. This applies to every slide.\n"
+            )
 
         prompt = f"""Build a {slide_count}-slide presentation for this course module.
 
@@ -746,13 +864,13 @@ INSTRUCTIONS — follow in order for EACH slide:
    - Charts / stats → make_chart or native slide.addChart().
    For D2/Mermaid PNGs: inspect the returned image, regenerate if labels
    are clipped, and NEVER distort the aspect ratio when inserting.
-3. Add ONLY the few text items from "On-slide text" (max {max_words_per_slide} words total).
+3. Add the text items from "On-slide text" exactly as the plan lists them — concise, no filler.
 4. Copy the full "Speaker notes" into slide.addNotes('...').
 5. Call render_slide every 2-3 slides to verify.
 
 A slide that the plan says needs a visual but you render as text-only
 bullets is WRONG. You MUST generate the visual. This is non-negotiable.
-"""
+{keepout_block}"""
         web_images = outline.get("web_images", {})
         if web_images:
             img_lines = ["\nWEB IMAGES (pre-downloaded from the web — use these local paths):"]
@@ -765,6 +883,8 @@ bullets is WRONG. You MUST generate the visual. This is non-negotiable.
                     line = f"  {heading}: path={info['path']} ({info.get('width_px', 0)}x{info.get('height_px', 0)}px, aspect={info.get('aspect', 0)})"
                     if info.get("attribution"):
                         line += f" — attribution: {info['attribution']}"
+                    if info.get("source"):
+                        line += f" — source: {info['source']}"
                     img_lines.append(line)
                 else:
                     img_lines.append(f"  {heading}: FAILED — no path available. Build a diagram/icon set instead.")
@@ -772,8 +892,11 @@ bullets is WRONG. You MUST generate the visual. This is non-negotiable.
             prompt += (
                 "\n\nFor slides with a web image, use slide.addImage({ path: '<path>' }) "
                 "with the local path above. Size to ~9x5 inches max, centered. "
-                "If the image has attribution, add a small text caption (8pt, subtext "
-                "color) at the bottom. If an image is marked FAILED, fall back to a generated "
+                "REQUIRED — every web image MUST carry a formal source citation directly beneath it: "
+                "a small caption (8pt italic, subtext color) reading 'Source: <attribution>, <source>' "
+                "using the attribution and source URL given for that image above (drop a part only if "
+                "it wasn't provided; NEVER invent a source). Do not place a web image without this "
+                "citation line. If an image is marked FAILED, fall back to a generated "
                 "visual (D2/Mermaid diagram, chart, or PptxGenJS shapes).\n"
                 "\nIMAGE ASPECT RATIO — ALL IMAGES (web images, source images, photos, "
                 "screenshots): NEVER stretch horizontally or vertically. Always scale "
@@ -905,10 +1028,11 @@ bullets is WRONG. You MUST generate the visual. This is non-negotiable.
     @tool(
         "make_icon",
         "Render a react-icons icon to PNG. Returns the image so you can inspect "
-        "it before inserting into a slide. icon_pack: 'fa' (Font Awesome), 'md' "
-        "(Material Design), 'hi2' (Heroicons v2), 'tb' (Tabler), 'bs' "
-        "(Bootstrap), 'ai' (Devicons). icon_name: the export name, e.g. "
-        "'FaRocket', 'MdDashboard', 'HiAcademicCap'. color: hex WITHOUT # prefix.",
+        "it before inserting into a slide. Get icon_name + icon_pack from find_icon "
+        "first — a guessed name often doesn't exist and wastes a turn. icon_pack: "
+        "'fa' (Font Awesome), 'md' (Material Design), 'hi2' (Heroicons v2), 'tb' "
+        "(Tabler), 'bs' (Bootstrap), 'ai' (Devicons). icon_name: the export name, "
+        "e.g. 'FaRocket', 'MdDashboard', 'HiAcademicCap'. color: hex WITHOUT # prefix.",
         {"icon_name": str, "icon_pack": str, "out_path": str, "color": str, "size": int},
     )
     async def make_icon_tool(args):
@@ -943,6 +1067,37 @@ bullets is WRONG. You MUST generate the visual. This is non-negotiable.
                     f"Insert via slide.addImage({{ path: '{icon_path}', x: ..., y: ..., w: 0.6, h: 0.6 }}).",
         })
         return {"content": content}
+
+    @tool(
+        "find_icon",
+        "Search the installed react-icons library for REAL, valid icon names by concept "
+        "(e.g. 'handshake', 'lock', 'gauge', 'people'). Returns actual export names and the "
+        "pack each lives in — names make_icon is guaranteed to render. ALWAYS use this to get "
+        "a name instead of guessing: a guessed icon_name often doesn't exist and wastes a turn.",
+        {"query": str},
+    )
+    async def find_icon_tool(args):
+        if not pptxgen_session:
+            return {
+                "content": [{"type": "text", "text": "find_icon requires a PptxGenJS session (new build mode)."}],
+                "is_error": True,
+            }
+        result = pptxgen_session.find_icon(query=args["query"])
+        if not result.get("success"):
+            return {
+                "content": [{"type": "text", "text": f"find_icon error: {result.get('error')}"}],
+                "is_error": True,
+            }
+        matches = result.get("matches", [])
+        if not matches:
+            return {"content": [{"type": "text", "text": (
+                f"No icons matched '{args['query']}'. Try a simpler or synonym term "
+                f"(e.g. 'ban' for no-entry, 'users' for people, 'gauge' for speedometer)."
+            )}]}
+        lines = "\n".join(f"  {m['name']}  (icon_pack: '{m['pack']}')" for m in matches)
+        return {"content": [{"type": "text", "text": (
+            f"Real icons matching '{args['query']}' — pass the name + its icon_pack to make_icon:\n{lines}"
+        )}]}
 
     @tool(
         "render_slide",
@@ -1010,6 +1165,7 @@ bullets is WRONG. You MUST generate the visual. This is non-negotiable.
             make_d2_tool,
             make_mermaid_tool,
             make_icon_tool,
+            find_icon_tool,
             render_slide_tool,
             read_summary_tool,
         ]
@@ -1021,6 +1177,7 @@ bullets is WRONG. You MUST generate the visual. This is non-negotiable.
             "mcp__pptx__make_d2_diagram",
             "mcp__pptx__make_mermaid_diagram",
             "mcp__pptx__make_icon",
+            "mcp__pptx__find_icon",
             "mcp__pptx__render_slide",
             "mcp__pptx__read_summary",
         ]
@@ -1097,12 +1254,26 @@ bullets is WRONG. You MUST generate the visual. This is non-negotiable.
     from .base import STYLE_RULE
     sys_prompt += STYLE_RULE
 
+    # Per-run API-key override: if a build was started with an owner's alternate Anthropic key,
+    # forward it (plus the rest of the process env) to the Claude Code subprocess. When there's no
+    # override we leave env unset so the subprocess uses its default environment as before.
+    _opts_kwargs: dict = {}
+    try:
+        from .. import keyring as _keyring
+        _ovr = _keyring.anthropic_override()
+        if _ovr:
+            import os as _os
+            _opts_kwargs["env"] = {**_os.environ, "ANTHROPIC_API_KEY": _ovr}
+    except Exception:
+        pass
+
     options = ClaudeAgentOptions(
         mcp_servers={"pptx": pptx_mcp},
         allowed_tools=allowed,
         permission_mode="acceptEdits",
         system_prompt=sys_prompt,
         max_turns=max_turns,
+        **_opts_kwargs,
     )
 
     # ── Drive the agent loop ─────────────────────────────────────
@@ -1115,6 +1286,8 @@ bullets is WRONG. You MUST generate the visual. This is non-negotiable.
 
     try:
         final_result: Optional[str] = None
+        _tool_names: dict = {}       # tool name -> count
+        _action_counts: dict = {}    # "name(input-preview)" -> count, to spot repeated/spinning actions
         async for message in query(prompt=prompt, options=options):
             if isinstance(message, AssistantMessage):
                 from claude_agent_sdk import ToolUseBlock
@@ -1123,6 +1296,9 @@ bullets is WRONG. You MUST generate the visual. This is non-negotiable.
                         _tool_count += 1
                         elapsed = _time.time() - _t0
                         inp_preview = json.dumps(block.input)[:120] if block.input else ""
+                        _tool_names[block.name] = _tool_names.get(block.name, 0) + 1
+                        _ak = f"{block.name}({inp_preview})"
+                        _action_counts[_ak] = _action_counts.get(_ak, 0) + 1
                         print(
                             f"[{_label}] tool {_tool_count}/{max_turns} "
                             f"@ {elapsed:.0f}s — {block.name}({inp_preview})",
@@ -1136,6 +1312,25 @@ bullets is WRONG. You MUST generate the visual. This is non-negotiable.
                 try:
                     from .base import report_exact_cost
                     report_exact_cost(_label, cost)   # exact, cache-aware; per-run sink
+                except Exception:
+                    pass
+                # Structured build summary for the generation trace: surfaces spinning
+                # (one action repeated many times) and tool-budget exhaustion.
+                try:
+                    from .base import report_build_summary
+                    _worst = max(_action_counts.items(), key=lambda kv: kv[1], default=(None, 0))
+                    report_build_summary(_label, {
+                        "turns": getattr(message, "num_turns", None),
+                        "tools": _tool_count,
+                        "tools_by_name": _tool_names,
+                        "elapsed_s": round(elapsed, 1),
+                        "cost_usd": cost,
+                        "stop": message.stop_reason,
+                        "status": message.subtype,
+                        "hit_max_turns": bool(_tool_count >= max_turns or message.subtype == "error_max_turns"),
+                        "repeated_actions": sum(1 for v in _action_counts.values() if v >= 3),
+                        "worst_repeat": ({"action": _worst[0], "count": _worst[1]} if _worst[1] >= 3 else None),
+                    })
                 except Exception:
                     pass
                 print(

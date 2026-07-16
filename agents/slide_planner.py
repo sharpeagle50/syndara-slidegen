@@ -13,7 +13,7 @@ from __future__ import annotations
 import re
 import time
 
-from .base import BaseAgent, STYLE_RULE, strip_em_dashes
+from .base import BaseAgent, STYLE_RULE, strip_em_dashes, visual_directive
 
 
 SLIDE_PLANNER_SYSTEM = """You are the Syndara Slide Content Researcher.
@@ -92,6 +92,14 @@ SOURCE QUALITY AND FACT-CHECKING (do this as you go, not at the end)
   cover both and explain what's driving the shift.
 - Cite every non-obvious fact. Inline citations like `[source: vendor.com/page]`
   or `[source: Gartner 2025 report]` so the creator can sanity-check.
+- Any slide that states a STATISTIC, exact figure, percentage, dollar amount,
+  date, or other very specific factual claim MUST carry its source ON that slide,
+  not only on the end references slide. You signal this per slide with the **Data
+  source** field: fill it with the exact citation text for such slides, or 'N/A'
+  for slides that make no specific claim. That single field IS the difference
+  between a slide that needs an in-slide reference and one that doesn't — the
+  builder renders the Data source verbatim when it isn't 'N/A', so decide the
+  exact wording here and the builder never has to.
   When you've cross-verified a shaky source, cite BOTH the original and
   the confirming source: `[source: blog.com/post; confirmed: reuters.com/article]`.
 
@@ -137,8 +145,13 @@ summary_slide | section_divider | agenda_slide | quote_slide>
 - **Image search query:** <Fallback search query if the URL breaks. Write
   a descriptive query like "Claude Code terminal interface screenshot".
   Write 'N/A' for non-image types.>
-- **Data source:** <URL or citation for any real data shown. Write 'N/A'
-  if the visual is conceptual or type is 'none'.>
+- **Data source:** <The exact source citation for any statistic, figure, %, $,
+  date, or other specific factual claim this slide states — whether shown in a
+  chart/visual OR in the on-slide TEXT (yes, even when Type is 'none'). Write the
+  short citation you want printed on the slide, e.g. 'Gartner, 2025' or
+  'vendor.com/report'. Write 'N/A' ONLY when the slide makes no such specific
+  claim (purely conceptual/teaching content). This is the single per-slide flag:
+  not-'N/A' → the builder prints it on the slide; 'N/A' → nothing on-slide.>
 - **Attribution:** <REQUIRED if type is image/photo/screenshot. Credit
   the source: "Anthropic — official documentation" or "NASA/JPL —
   public domain" or "React docs — Meta Open Source". Write 'N/A' for
@@ -146,14 +159,15 @@ summary_slide | section_divider | agenda_slide | quote_slide>
 - **Teaching purpose:** <One sentence: what does this visual teach that
   text alone cannot? Write 'N/A' if type is 'none'.>
 
-**On-slide text** (COMPLETE list of every word visible on the slide —
-MAXIMUM {max_words_per_slide} words total across ALL items combined):
+**On-slide text** (COMPLETE list of every word visible on the slide):
 - <exact text item 1 — e.g. "3 AI coding assistants compared">
 - <exact text item 2 — e.g. "$0/mo free tier">
 - <exact text item 3 — e.g. "Context-aware completions">
 (List every text element: title, subtitle, bullet, label, callout, stat.
-If a visual has labels, those count toward the {max_words_per_slide}-word limit. 2–4 items
-typical. NO item longer than 6 words. NO full sentences.)
+Be concise — no more words than the point needs, but not so few the slide is
+cryptic without the narration. Visual-forward slides carry only short labels/
+phrases; text-forward slides (bullets, columns, a table) can carry fuller lines
+so they actually explain the idea. Avoid dense paragraphs.)
 
 **Speaker notes** (up to 300 words of narration read aloud by TTS —
 no minimum, write what feels appropriate for the slide. A quick visual
@@ -175,10 +189,15 @@ Cite every non-obvious fact inline: `[source: url-or-name]`.>
 ```
 
 CONTENT PHILOSOPHY (critical — the next agent reads this)
-- The SLIDE shows MAXIMUM 20 WORDS of text. That's it. Key phrases, big
-  numbers, short labels — NOT sentences. If a slide has more than 3 short
-  bullets or any bullet longer than 6 words, you're doing it wrong. Push
-  ALL depth into speaker notes. The slide is a visual anchor, not a document.
+- CREATOR'S REQUEST WINS. If the course description or the creator's instructions
+  ask for a specific lean — "mostly text/bullet slides", "mostly diagrams/images",
+  "be verbose/explanatory", "keep it concise" — follow THAT over the defaults
+  below. Use these recommended defaults only when they haven't specified.
+- {layout_lean}
+- Be concise, not cryptic: push the deep teaching into speaker notes, but the
+  slide must make sense on its own. Almost never a bare, unstructured wall of text
+  (references slides excepted) — give text a shape (an image beside it, columns, a
+  table, clear hierarchy).
 - NEVER use emoji characters (🔒 🔍 💡 ⚡ etc.) anywhere in on-slide text,
   speaker notes, or bullet points. They look unprofessional in presentation
   slides. Use plain words only.
@@ -221,9 +240,10 @@ CONTENT PHILOSOPHY (critical — the next agent reads this)
       recognition matters. When you use this type, you MUST provide an
       Image URL from your research and an Attribution.
     * icon_set → 3–5 conceptual icons with labels (e.g. tool-category tiles)
-    * table → small structured comparison (only if chart/diagram doesn't fit)
-- Aim for 70%+ of content slides to carry a real visual (not just the
-  title/summary slides). Text-only bullet slides should be rare exceptions.
+    * table → structured comparison, do/don't, or items-by-attribute
+- Give most content slides a strong focal element — a real visual (diagram,
+  chart, image) or a well-structured layout consistent with the layout guidance
+  above. What to avoid is the bare, unstructured wall of text.
 - Do NOT invent data. If a chart is warranted, describe exactly what data it
   should plot and where the data comes from (cite the source). If you can't
   find real data, pick a different visual type or different layout.
@@ -248,15 +268,28 @@ LAYOUT PALETTE (pick the best fit per slide)
   chart_slide, flowchart_slide, image_slide, question_slide
 
 HEURISTICS
-- Open with title_slide. Close with summary_slide. Don't pad.
-- If you include a references/citations slide at the end, its speaker notes
-  must be ONE short sign-off sentence like "These are the references used in
-  this module — thank you for listening!". NEVER read URLs, citations, or
-  source names aloud in the narration.
-- Vary layouts — don't let every middle slide be bullet_slide.
-- The prompt gives a slide-count RANGE. Use however many slides within that
-  range best fit the material — but never go below the minimum or above the
-  maximum. More focused slides are better than fewer overloaded ones.
+- Open with title_slide. Close with summary_slide, then ALWAYS end with a
+  references/citations slide. Don't pad the body.
+- The closing references slide is MANDATORY — never omit it and never leave it
+  empty. It must list EVERY source used anywhere in the module: every inline
+  `[source: ...]` citation, every slide's **Data source**, and every image's
+  **Attribution**. One line per source, each a full citation — source name or page
+  title + the URL. If a fact or image had a source, it MUST appear here.
+- If there are more sources than fit legibly on ONE slide, continue onto
+  additional references slides (a 2nd, 3rd, … at the end) rather than cramming or
+  shrinking text to fit — readability wins. Split the list across as many
+  references slides as it takes.
+- Speaker notes on references slides: the FIRST references slide's notes are ONE
+  short sign-off sentence like "These are the references used in this module —
+  thank you for listening!". Any ADDITIONAL references slides have EMPTY speaker
+  notes — no narration (the sign-off was already said; they're just more
+  references). NEVER read URLs, citations, or source names aloud.
+- Vary layouts — don't let the deck fall into a rut (every slide a bullet_slide,
+  or every slide a diagram/table). Mix visual-forward and text-forward slides.
+- The prompt gives a TARGET slide count and a hard range. Fill the deck out
+  to roughly the target; don't settle at the low end — a thin deck under-covers
+  the material. Stay within the range (never above the maximum), and prefer
+  more focused slides over fewer overloaded ones.
 - Put comprehension questions only where they genuinely check understanding,
   at most twice per module. Mark them with **Layout:** `question_slide`.
   For question slides, use this structure:
@@ -311,6 +344,9 @@ class SlidePlannerAgent(BaseAgent):
         max_questions caps in-slide comprehension question_slides (0 = none).
         """
         self._apply_max_words(outline.get("max_words_per_slide") or 20)
+        # The visual↔text slider level fills the {layout_lean} placeholder — it IS the layout section.
+        self.system_prompt = self.system_prompt.replace(
+            "{layout_lean}", visual_directive(outline.get("visual_level")))
         import json as _j
         is_revise = bool(previous_plan and feedback)
         mod_pos = outline.get("module_position") or outline.get("module_id") or "?"
@@ -370,10 +406,12 @@ prior outline — you start from the title and summary above. Research the
 topic thoroughly, then design the slide-by-slide plan based on what you
 find.
 
-DECK LENGTH: plan between {slide_lo} and {slide_hi} slides (inclusive).
-You have full discretion WITHIN that range — use however many slides best
-fit the material — but NEVER go outside it. Open with a title_slide and
-close with a summary_slide.
+DECK LENGTH: aim for about {target_slides} slides (you may range from
+{slide_lo} to {slide_hi}). Fill a thorough, complete deck close to the
+target. Do NOT settle near the low end: a thin deck under-covers the
+material and short-changes the learner. Only go below {target_slides} if
+the topic genuinely cannot support more, and NEVER exceed {slide_hi}. Open
+with a title_slide and close with a summary_slide.
 
 {questions_directive}
 
@@ -383,13 +421,14 @@ CRITICAL — FOLLOW THE OUTPUT FORMAT EXACTLY:
 Every slide MUST have ALL of these sections in this exact order:
 1. **Layout** — one layout type from the palette
 2. **Visual elements** — Type, Detailed description, Data source, Teaching purpose
-3. **On-slide text** — bullet list of EVERY visible word (max {max_words_per_slide} words total)
+3. **On-slide text** — bullet list of EVERY visible word (concise; only as many as the point needs)
 4. **Speaker notes** — up to 300 words of TTS narration (the real teaching content)
 5. **Sources** — URLs used for this slide
 
-ON-SLIDE TEXT: List the EXACT text that appears on the slide. Max {max_words_per_slide} words
-total. No item longer than 6 words. No full sentences. If you can replace
-text with a chart, flowchart, or diagram, do it.
+ON-SLIDE TEXT: List the EXACT text that appears on the slide. Be concise — as few
+words as convey the point on a visual slide, a bit more on a text-forward slide
+that has to explain. Choose a visual vs a text-forward layout per the layout
+guidance above.
 
 SPEAKER NOTES: Up to 300 words each, no minimum — match length to the
 slide. A quick visual might only need 10–20 words of narration; a dense

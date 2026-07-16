@@ -8,6 +8,8 @@ import re
 from pathlib import Path
 from urllib.parse import urlparse
 
+from .. import keyring
+
 log = logging.getLogger(__name__)
 
 MAX_FILE_BYTES = 15 * 1024 * 1024
@@ -135,7 +137,7 @@ SEARCH_MODEL = "claude-sonnet-5"
 async def search_and_fetch_image(query: str, out_path: str) -> dict:
     import anthropic
 
-    client = anthropic.AsyncAnthropic()
+    client = keyring.async_anthropic()
     try:
         resp = await client.messages.create(
             model=SEARCH_MODEL,
@@ -295,7 +297,7 @@ async def _fetch_page_html(url: str, timeout: float = 15.0) -> str:
 async def _search_candidate_pages(query: str, max_pages: int = 5) -> list[str]:
     """Real candidate PAGE urls from the web_search index (not model-emitted image URLs)."""
     import anthropic
-    client = anthropic.AsyncAnthropic()
+    client = keyring.async_anthropic()
     urls: list[str] = []
     try:
         resp = await client.messages.create(
@@ -400,7 +402,7 @@ async def verify_image(intent: str, image_path: str) -> dict:
             _buf = _io.BytesIO()
             _im.save(_buf, format="JPEG", quality=85)
         b64 = base64.standard_b64encode(_buf.getvalue()).decode()
-        client = anthropic.AsyncAnthropic()
+        client = keyring.async_anthropic()
         resp = await client.messages.create(
             model=VISION_MODEL,
             # Headroom for Sonnet 5 adaptive thinking (shares the budget) before the JSON verdict.
@@ -432,11 +434,19 @@ async def verify_image(intent: str, image_path: str) -> dict:
         m = re.search(r"\{.*\}", text, re.S)
         if m:
             d = _json.loads(m.group(0))
-            return {
-                "matches": bool(d.get("matches", True)),
-                "caption": str(d.get("caption", "")).strip(),
-                "reason": str(d.get("reason", "")).strip(),
-            }
+            _matches = bool(d.get("matches", True))
+            _caption = str(d.get("caption", "")).strip()
+            _reason = str(d.get("reason", "")).strip()
+            # Record the verify decision so a downstream "inaccurate_visual" QA flag can be
+            # correlated: did this image already pass the fetch-time relevance check?
+            try:
+                from ..agents.base import report_gen_event
+                report_gen_event("image", "verify " + ("kept" if _matches else "REJECTED"),
+                                 {"intent": (intent or "")[:200], "reason": _reason[:300],
+                                  "caption": _caption[:300]})
+            except Exception:
+                pass
+            return {"matches": _matches, "caption": _caption, "reason": _reason}
     except Exception as e:
         log.warning("verify_image failed for %s: %s", image_path, e)
     finally:
@@ -547,6 +557,7 @@ async def download_plan_images(image_entries: list[dict], images_dir: str) -> di
                 "height_px": result["height_px"],
                 "aspect": result["aspect"],
                 "attribution": entry.get("attribution", ""),
+                "source": entry.get("source", "") or result.get("source_page", ""),
                 "caption": caption,
                 "failed": False, "error": "",
             }

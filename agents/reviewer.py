@@ -267,6 +267,12 @@ Produce JSON: {{"status": "approved"|"revise", "feedback": "...", "issues": ["un
         # Retry once: ask the model to reformat its own review as valid JSON.
         print("[Reviewer] verdict didn't parse — asking model to reformat it...")
         try:
+            from .base import report_gen_event
+            report_gen_event("retry", "Reviewer verdict reformat — model returned unparseable JSON",
+                             {"agent": "Reviewer"})
+        except Exception:
+            pass
+        try:
             response = self.call(
                 [{"role": "user", "content": (
                     "Convert the following slide-deck review into valid JSON with EXACTLY these keys: "

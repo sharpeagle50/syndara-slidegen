@@ -22,6 +22,32 @@ try {
     // Icon rendering unavailable — dependencies not installed
 }
 
+// Search the installed react-icons packs for real export names matching a concept.
+// Backs both the find_icon command and make_icon's "did you mean" suggestion, so the
+// builder never has to guess a name that may not exist. `require` is cached, so repeat
+// calls just iterate the already-loaded key lists (fast).
+const _ICON_PACKS = ['fa6', 'fa', 'md', 'tb', 'hi2', 'bs', 'ai'];
+function searchIcons(query, packs, limit) {
+    const raw = String(query || '').toLowerCase();
+    const compact = raw.replace(/[^a-z0-9]/g, '');
+    if (!compact) return [];
+    const tokens = raw.split(/[^a-z0-9]+/).filter(t => t.length >= 3);
+    const out = [];
+    for (const packName of (packs && packs.length ? packs : _ICON_PACKS)) {
+        let pack;
+        try { pack = require(`react-icons/${packName}`); } catch (e) { continue; }
+        for (const name of Object.keys(pack)) {
+            if (name[0] !== name[0].toUpperCase()) continue; // icon exports only
+            const lname = name.toLowerCase();
+            if (lname.includes(compact) || (tokens.length > 0 && tokens.every(t => lname.includes(t)))) {
+                out.push({ name, pack: packName });
+            }
+        }
+    }
+    out.sort((a, b) => a.name.length - b.name.length || a.name.localeCompare(b.name));
+    return out.slice(0, limit || 40);
+}
+
 let pptx = null;
 let pptxPath = '';
 let style = {};
@@ -192,6 +218,10 @@ rl.on('line', (line) => {
                 });
             return; // async — wait for writeFile to finish before processing next line
         }
+        else if (msg.cmd === 'find_icon') {
+            respond({ success: true, query: msg.query, matches: searchIcons(msg.query, msg.packs, msg.limit || 40) });
+            return;
+        }
         else if (msg.cmd === 'render_icon') {
             if (!React || !ReactDOMServer || !sharp) {
                 respond({ success: false, error: 'Icon rendering unavailable — react, react-dom, or sharp not installed.' });
@@ -210,8 +240,14 @@ rl.on('line', (line) => {
             }
             const IconComponent = pack[iconName];
             if (!IconComponent) {
-                const available = Object.keys(pack).filter(k => k[0] === k[0].toUpperCase()).slice(0, 20);
-                respond({ success: false, error: `Icon '${iconName}' not in pack '${packName}'. Examples: ${available.join(', ')}` });
+                // Turn a miss into a one-step self-correction: strip the pack-style prefix
+                // (Fa/Md/Hi…) to recover the concept and suggest real names across packs.
+                const concept = iconName.replace(/^[A-Z][a-z]/, '');
+                const sugg = searchIcons(concept || iconName, null, 12);
+                const hint = sugg.length
+                    ? sugg.map(m => `${m.name} (icon_pack '${m.pack}')`).join(', ')
+                    : Object.keys(pack).filter(k => k[0] === k[0].toUpperCase()).slice(0, 12).join(', ');
+                respond({ success: false, error: `Icon '${iconName}' not in pack '${packName}'. Did you mean: ${hint}. Or call find_icon to search by concept.` });
                 return;
             }
             const element = React.createElement(IconComponent, { size, color });

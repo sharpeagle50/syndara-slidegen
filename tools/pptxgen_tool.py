@@ -10,6 +10,7 @@ import json
 import os
 import subprocess
 import threading
+import time
 from collections import deque
 from pathlib import Path
 from typing import IO, Optional
@@ -84,15 +85,37 @@ class PptxGenSession:
 
     def render_icon(self, icon_name: str, icon_pack: str, out_path: str,
                     color: str = "000000", size: int = 256) -> dict:
-        """Render a react-icons icon to PNG. Returns {success, base64, path, size}."""
-        return self._send({
+        """Render a react-icons icon to PNG. Returns {success, base64, path, size}.
+
+        The sharp/react render step occasionally fails on a perfectly valid icon (a
+        transient runtime hiccup), which otherwise costs the builder a whole turn to
+        notice and retry — the visible symptom is a slide falling back to a numbered
+        circle. Retry that ONE failure mode a couple of times with a short backoff.
+        Deterministic failures (bad name/pack, missing deps) carry a different error
+        and return immediately, so a real problem is never masked."""
+        msg = {
             "cmd": "render_icon",
             "icon_name": icon_name,
             "icon_pack": icon_pack,
             "out_path": out_path,
             "color": color,
             "size": size,
-        })
+        }
+        result = self._send(msg)
+        for attempt in range(2):   # up to two extra tries after the first
+            if result.get("success"):
+                return result
+            if "sharp" not in (result.get("error") or "").lower():
+                return result   # not the transient render failure — don't retry
+            time.sleep(0.3 * (attempt + 1))
+            result = self._send(msg)
+        return result
+
+    def find_icon(self, query: str, limit: int = 40) -> dict:
+        """Search the installed react-icons names for a concept (e.g. 'handshake').
+        Returns {success, matches: [{name, pack}]} — real names make_icon will render,
+        so the builder never has to guess a name that may not exist."""
+        return self._send({"cmd": "find_icon", "query": query, "limit": limit})
 
     def snapshot(self, snap_path: str) -> dict:
         """Write a temporary copy of the PPTX for rendering without ending the session."""

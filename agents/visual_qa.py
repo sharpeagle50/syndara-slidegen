@@ -6,6 +6,8 @@ import traceback
 from pathlib import Path
 from typing import Optional
 
+from .. import keyring
+
 
 QA_SYSTEM_PROMPT = """\
 You are a visual QA inspector for presentation slides. You receive rendered slide images and check for visual defects.
@@ -21,7 +23,7 @@ Inspect each slide for these 13 categories of defects:
 7. **empty_slide** — slides with barely any content or completely blank
 8. **diagram_legibility** — diagram/chart labels too small, clipped, or unreadable
 9. **inconsistent_styling** — slides that don't match the expected color palette or font style
-10. **excessive_text** — slides with too many words visible (more than ~{max_words} words of on-slide text). EXCEPTION: a references / sources / citations / bibliography / further-reading slide (a list of citation entries) is EXEMPT — full citations legitimately exceed the word limit; never flag such a slide as excessive_text or tell the builder to shorten the citations.
+10. **excessive_text** — a slide so text-dense it reads as a document or wall of text, or is visually cramped/hard to scan: full paragraphs where phrases would do, or text packed so tightly legibility suffers. This is a LEGIBILITY / DENSITY judgment, NOT a word count — a clean, well-structured text-forward slide (bullets, columns, or a table that explains a concept) is FINE even if it carries more words than a visual slide; only flag text that is genuinely unstructured, paragraph-like, or cramped. EXCEPTIONS: references / sources / citations / bibliography / further-reading slides are always exempt (full citations legitimately run long); and never flag a slide the plan intended as text-forward merely for carrying explanatory text — flag it only if the text is actually cramped or unreadable.
 11. **broken_connectors** — connecting lines in diagrams that don't actually reach their target shapes, protrude past them, overlap/cut through other shapes, or stop short. Lines should start at one shape edge and end at another — flag any that look disconnected, misrouted, or visually broken
 12. **misaligned_elements** — elements that visually appear intended to be aligned but aren't. Check: titles or centered text that's slightly off-center on the slide; icons or images that don't line up vertically with adjacent text; columns or grid items at inconsistent heights; rows of elements with uneven spacing. Only flag when the misalignment is clearly unintentional — deliberate asymmetric or staggered layouts are fine
 13. **inaccurate_visual** — an image, screenshot, diagram, chart, or icon that does NOT match what the slide's own title, caption, or body text says it shows. This is a CONTENT/accuracy check, not a layout check — read the slide's words, then look at its visual and judge whether they agree. Flag when: the slide names or describes a specific interface/screen/product but the image is a logo, wordmark, generic branding, or an unrelated stock photo; a diagram or chart contradicts, misrepresents, or omits the facts stated in the slide text; a screenshot is labeled as one thing but clearly shows another; data in a chart doesn't match the numbers in the text. Do NOT flag a reasonable, relevant illustration just because it isn't a perfect, official, or high-resolution example — only flag a genuine mismatch between what the slide claims and what the visual actually depicts. Each slide's label may include what the PLAN intended it to show ("Planned visual: ..."); when present, verify the rendered visual against that plan, and use the planned title to confirm you're judging the right slide. A slide whose label says it is TEXT-ONLY has no primary visual — NEVER flag it under inaccurate_visual.
@@ -34,6 +36,7 @@ Respond with ONLY valid JSON (no markdown fences, no explanation) in this format
     {
       "slide_index": <1-based slide number matching the label>,
       "issues": ["category_name", ...],
+      "severity": "critical" | "minor",
       "description": "Human-readable description of what's wrong",
       "suggestion": "Specific fix suggestion"
     }
@@ -42,6 +45,19 @@ Respond with ONLY valid JSON (no markdown fences, no explanation) in this format
 
 Only include slides that have defects. If all slides look good, return: {"slides": []}
 Be strict but fair — flag real visual problems, not minor aesthetic preferences.
+
+SEVERITY — set "severity" on every flagged slide so we don't spend a full rebuild pass on a
+cosmetic nit:
+- "critical": the slide looks broken or WRONG to a learner — text cut off / overflowing the slide,
+  elements overlapping so content is obscured, unreadable low-contrast text, placeholder or template
+  artifacts, an empty slide, unreadable diagram/chart labels, broken or misrouted connectors, or a
+  visual that contradicts the slide's own text (inaccurate_visual).
+- "minor": a small aesthetic imperfection that does NOT impede understanding — a slightly off-center
+  title, a few words over the text limit, mild palette/style inconsistency, or slightly uneven spacing.
+When you are unsure, choose "critical". Calibration examples:
+- Title text runs off the right edge → "critical" (text_overflow).
+- A subtitle sits ~15px left of center on an otherwise clean slide → "minor" (misaligned_elements).
+- A label is 0.4in from the edge but fully readable → do NOT flag it at all.
 """
 
 BATCH_SIZE = 6
@@ -53,8 +69,7 @@ class VisualQAAgent:
     model = "claude-sonnet-5"
 
     def __init__(self):
-        from anthropic import Anthropic
-        self.client = Anthropic()
+        self.client = keyring.sync_anthropic()
 
     def inspect(self, pptx_path: str, style_palette: Optional[dict] = None,
                 only_indices: Optional[list[int]] = None,
@@ -213,6 +228,13 @@ class VisualQAAgent:
                 # schema and reparse; only if THAT also fails do we flag the slides
                 # for re-inspection rather than treating them as clean.
                 recovered = False
+                try:
+                    from .base import report_gen_event
+                    report_gen_event(
+                        "retry", f"VisualQA JSON reformat — model returned prose for slides {slide_nums}",
+                        {"agent": "VisualQA", "reason": str(parse_err)[:200]})
+                except Exception:
+                    pass
                 if raw_text:
                     try:
                         reformatted = self._reformat_to_json(raw_text)
@@ -240,9 +262,11 @@ class VisualQAAgent:
             shutil.rmtree(_qa_render_dir, ignore_errors=True)
 
         defect_count = len(all_defects)
+        critical_count = sum(1 for d in all_defects if d.get("severity", "critical") == "critical")
         return {
             "status": "fail" if defect_count > 0 else "pass",
             "defect_count": defect_count,
+            "critical_count": critical_count,
             "slides": all_defects,
         }
 
@@ -252,9 +276,13 @@ class VisualQAAgent:
         the model's 1-based slide_index to 0-based)."""
         out: list[dict] = []
         for slide_defect in batch_result.get("slides", []):
+            _sev = slide_defect.get("severity")
             out.append({
                 "slide_index": slide_defect.get("slide_index", 1) - 1,
                 "issues": slide_defect.get("issues", []),
+                # Default missing/invalid severity to "critical" (fail-safe: an unlabeled defect
+                # still triggers a rebuild rather than silently shipping).
+                "severity": _sev if _sev in ("critical", "minor") else "critical",
                 "description": slide_defect.get("description", ""),
                 "suggestion": slide_defect.get("suggestion", ""),
             })
@@ -269,8 +297,11 @@ class VisualQAAgent:
             "Convert the following slide QA analysis into ONLY valid JSON — no "
             "markdown fences, no prose — in this exact format:\n"
             '{"slides": [{"slide_index": <1-based slide number>, '
-            '"issues": ["category_name"], "description": "what is wrong", '
-            '"suggestion": "specific fix"}]}\n'
+            '"issues": ["category_name"], "severity": "critical" | "minor", '
+            '"description": "what is wrong", "suggestion": "specific fix"}]}\n'
+            'Set "severity" from the analysis: "critical" if the slide looks broken or '
+            'wrong to a learner (text cut off/overflowing, overlap, unreadable), "minor" '
+            'for small polish issues. When the analysis is unclear, use "critical".\n'
             'Include ONLY slides that have a real defect. If none do, return '
             '{"slides": []}.\n\nANALYSIS:\n' + prose
         )

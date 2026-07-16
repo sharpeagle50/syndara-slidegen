@@ -18,7 +18,7 @@ from typing import Optional
 
 from pptx import Presentation
 
-from .base import BaseAgent
+from .base import BaseAgent, MaxTokensError
 from ..tools import slide_layouts
 
 MAX_ITERATIONS = 50
@@ -85,8 +85,9 @@ RULES:
   sign-off sentence like "These are the references used in this module —
   thank you for listening!". Never read URLs, citations, or source names
   aloud.
-- Text should be short: max {max_words_per_slide} words total on a slide. No single item longer
-  than 6 words. Callouts max 15 words. No walls of text.
+- Keep on-slide text concise — as many words as the point needs, no filler. Visual
+  slides get short labels; text-forward slides (bullets, columns, table) get fuller
+  lines. No walls of text.
 - NEVER use emoji characters (🔒 🔍 💡 ⚡ etc.) in any text field — they render
   as fixed-color OS glyphs that look unprofessional. Use plain words only.
 - Use the module's style name (provided below) consistently on every slide.
@@ -249,12 +250,23 @@ with appropriate kwargs AND speaker_notes. Use the module's title for your
 opening title_slide and build a summary_slide at the end.
 """
 
-        final_text, _ = self.run_tool_loop(
-            messages=[{"role": "user", "content": prompt}],
-            tools=[ADD_SLIDE_TOOL, READ_SUMMARY_TOOL],
-            tool_handlers=tool_handlers,
-            max_tokens=16000,
-        )
+        # Slides are built via add_slide tool side-effects; the final message is just a closing
+        # remark. A max_tokens cut-off on that CLOSING turn means the deck is already complete —
+        # don't discard it. Catch ONLY that case; a genuine mid-build failure (API retries exhausted)
+        # is a different exception and must still propagate so the build fails and can be retried.
+        try:
+            final_text, _ = self.run_tool_loop(
+                messages=[{"role": "user", "content": prompt}],
+                tools=[ADD_SLIDE_TOOL, READ_SUMMARY_TOOL],
+                tool_handlers=tool_handlers,
+                max_tokens=16000,
+            )
+        except MaxTokensError as e:
+            final_text = ""
+            if len(prs.slides) == 0:
+                raise
+            print(f"[AgenticSlideBuilder] closing turn truncated ({e}); "
+                  f"saving the {len(prs.slides)} slide(s) already built", flush=True)
 
         if len(prs.slides) == 0:
             raise RuntimeError(
