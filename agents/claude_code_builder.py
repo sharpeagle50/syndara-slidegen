@@ -414,6 +414,33 @@ sits behind it. Never render an icon in a near-background color (e.g. a
 white or very-light icon on a light tile) — it becomes invisible. Use the
 deck accent color on light fills, and a light color only on dark fills.
 
+PROGRESSIVE BUILDS (executing the plan's animation script — you do NOT choreograph):
+Some plan slides have Speaker notes written as a build SCRIPT: they start with [REVEAL] and
+contain inline markers like [[1 | show: the three stage cards]]. The PLAN owns all animation
+decisions. Your job is mechanical:
+1. Author the slide ONCE at its complete, final layout — every element the script ever shows,
+   all in their final positions (transients and both halves of a replacement included; on this
+   authored slide they all render at once, and that is expected). Elements never move or restyle
+   between beats; beats only show or hide elements (fade). Never reposition content for a
+   partial state. When the script says a replacement sits "in place" of what it replaces,
+   position it exactly there — the overlap is intentional staging.
+2. Copy the script into slide.addNotes() VERBATIM — header, markers, descriptions, all of it.
+3. Tag each animated element's objectName with its visibility window over the beat numbers:
+     objectName:'reveal:2'       appears at beat 2, stays to the end
+     objectName:'reveal:2-2'     visible ONLY during beat 2 (a transient)
+     objectName:'reveal:1-1,3'   in at beat 1, out at 2, back from 3 on (re-entry)
+   Read the windows off the script's descriptions: "[[2 | show: tip; hide: green note]]" means
+   the tip's window starts at 2 and the green note's window ends at 1 (closed: '1-1' — unless a
+   later marker shows it again, then '1-1,<that beat>'). Untagged elements are the base, visible
+   throughout. Several elements sharing a window = they animate together.
+4. Descriptions name elements loosely ("the ledger image") — map them to the shapes you created.
+   If the plan's script is malformed (markers not 1,2,3,…, a description referencing nothing you
+   can identify, an empty segment), build the slide STATIC with clean notes instead — a static
+   slide is always acceptable; a broken build is not. Do not invent, add, drop, or reorder beats.
+A slide whose plan notes have no [REVEAL] is a normal static slide — never add a build yourself.
+(Downstream, each marker becomes one extra physical slide with the not-yet-shown elements hidden;
+the markers never appear in the downloaded deck's notes, so copy them without worry.)
+
 TEXT ROTATION:
 PptxGenJS supports `rotate` (degrees, clockwise) on any element:
   sl.addText('Label', {{ x: 1, y: 2, w: 3, h: 0.6, rotate: 90,
@@ -475,6 +502,14 @@ For EACH slide in the plan:
 If you build a slide as text-only bullets when the plan says it needs a
 visual, the entire build will be rejected. This wastes the creator's time
 and yours. Generate the visual.
+
+SPECIAL CASE — **Type:** animation: this slide's visual is a Manim ANIMATION that is
+rendered separately and overlaid on the WHOLE slide AFTER you build it. Do NOT try to
+draw or approximate the animation, and do NOT call any diagram tool for it. Build a
+clean, uncluttered TITLE / POSTER slide — the slide title plus at most a one-line
+takeaway, with lots of open space (the animation will cover the slide when it plays).
+An animation slide is EXEMPT from the "must have a visual" rule and will NOT be
+rejected for having no diagram.
 
 HARD LIMITS:
 - Max {max_turns} total tool calls — you have plenty of budget, so spend

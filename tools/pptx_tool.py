@@ -194,6 +194,272 @@ def update_speaker_notes(pptx_path: str, slide_idx: int, notes: str) -> str:
     return pptx_path
 
 
+# ── Progressive reveal ("build") support ──────────────────────────────────────
+# A builder marks a slide for a progressive build by (1) tagging animated shapes with an objectName
+# of "reveal:<ranges>" where <ranges> is comma-separated visibility windows over beat numbers:
+#   reveal:2       visible from beat 2 to the end
+#   reveal:1-1     visible only during beat 1 (a transient overlay)
+#   reveal:1-1,3   in at beat 1, out, back from beat 3 onward (re-entry)
+# Untagged shapes are always visible. And (2) writing the speaker notes as a NARRATION SCRIPT with
+# inline stage-direction markers `[[ N | what happens ]]` after a leading "[REVEAL]" header — each
+# marker sits at the exact word beat N starts, and cutting the script at the markers yields one
+# narration segment per beat (segment 0 = the base, before the first marker).
+#
+# explode_build_slides() then turns each such slide into V = M+1 physical slides IN PLACE: the
+# original slide is duplicated per beat and shapes not visible at that beat get the native OOXML
+# hidden="1" attribute (PowerPoint's Selection-Pane hide — respected by PowerPoint, LibreOffice's
+# renderer, and Google Slides). Nothing is deleted and z-order is untouched, so every beat is
+# pixel-identical to the authored slide except which elements show, and collapse_build_slides() is
+# a lossless inverse (drop the earlier beats, unhide, rejoin the notes script). Each beat's notes
+# carry its own clean narration segment plus one ASCII cue line `(build G | beat B/V | desc)` that
+# doubles as a presenter stage cue and the round-trip metadata.
+_REVEAL_NAME_RE = re.compile(r"^reveal:(\d+(?:-\d+)?(?:,\d+(?:-\d+)?)*)$", re.IGNORECASE)
+_REVEAL_MARKER_RE = re.compile(r"\[\[[^\[\]]*\]\]")   # any inline stage direction [[ … ]]
+_REVEAL_MARKER_STEP_RE = re.compile(r"\[\[\s*(\d+)\s*\|\s*([^\[\]]*?)\s*\]\]")  # [[ N | desc ]]
+_BUILD_CUE_RE = re.compile(r"^\(build (\d+) \| beat (\d+)/(\d+)(?: \| ([^)\n]*))?\)\s*$", re.MULTILINE)
+MAX_BUILD_BEATS = 9   # sanity cap: at most 9 markers (10 physical slides) per build slide
+
+
+def _parse_reveal_segments(notes: str) -> list[str]:
+    """Split reveal speaker notes into ordered per-step narration segments by cutting at the inline
+    [[ … ]] markers. Segment 0 is the text before the first marker (base/step-0 narration); each
+    following segment is what's narrated while its step's element(s) are on screen. Returns [] when
+    the notes are not a reveal block (no leading [REVEAL]) so normal slides are unaffected."""
+    if not notes or "[REVEAL]" not in notes:
+        return []
+    body = notes.split("[REVEAL]", 1)[1]
+    parts = [p.strip() for p in _REVEAL_MARKER_RE.split(body)]
+    return [p for p in parts if p]
+
+
+def strip_reveal_markup(notes: str) -> str:
+    """Clean narration with the [REVEAL] header and every inline [[ … ]] stage-direction marker
+    removed — what the downloadable pptx speaker notes should show (no animation directions)."""
+    if not notes:
+        return notes
+    text = _REVEAL_MARKER_RE.sub(" ", notes.replace("[REVEAL]", " "))
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def clean_reveal_notes(pptx_path: str) -> int:
+    """Rewrite every reveal slide's speaker notes to clean narration (markers stripped), so the
+    downloadable pptx reads normally. Returns the number of slides cleaned; no-op on slides without
+    reveal markup. Call AFTER the reveal frames/segments have been extracted from this pptx."""
+    try:
+        prs = Presentation(pptx_path)
+    except Exception:
+        return 0
+    n = 0
+    for slide in prs.slides:
+        if not slide.has_notes_slide:
+            continue
+        tf = slide.notes_slide.notes_text_frame
+        if tf.text and "[REVEAL]" in tf.text:
+            tf.text = strip_reveal_markup(tf.text)
+            n += 1
+    if n:
+        prs.save(pptx_path)
+    return n
+
+
+def _reveal_ranges(name: str) -> Optional[list[tuple[int, Optional[int]]]]:
+    """Parse a reveal objectName into visibility windows [(first, last|None), ...] — None if the
+    shape isn't reveal-tagged. A bare number means "from that beat to the end"."""
+    m = _REVEAL_NAME_RE.match(name or "")
+    if not m:
+        return None
+    out: list[tuple[int, Optional[int]]] = []
+    for part in m.group(1).split(","):
+        if "-" in part:
+            a, b = part.split("-")
+            out.append((int(a), int(b)))
+        else:
+            out.append((int(part), None))
+    return out
+
+
+def _shape_visible_at(ranges: list[tuple[int, Optional[int]]], k: int) -> bool:
+    """A reveal-tagged shape is visible on beat k iff k falls inside any of its windows."""
+    return any(first <= k and (last is None or k <= last) for first, last in ranges)
+
+
+def parse_reveal_script(notes: str) -> Optional[dict]:
+    """Parse a [REVEAL] narration script into {"segments": [seg0..segM], "markers": [(1,desc1)..]}.
+    Returns None unless well-formed: a [REVEAL] header, 1..MAX_BUILD_BEATS markers whose step
+    numbers are exactly 1,2,...,M in order, and a non-empty narration segment for every beat
+    (that's what gives each beat its timing/narration). Malformed → None → static slide."""
+    if not notes or "[REVEAL]" not in notes:
+        return None
+    body = notes.split("[REVEAL]", 1)[1]
+    markers = [(int(m.group(1)), m.group(2).strip()) for m in _REVEAL_MARKER_STEP_RE.finditer(body)]
+    # Any [[…]] not matching the N|desc form makes the script ambiguous — reject.
+    if len(markers) != len(_REVEAL_MARKER_RE.findall(body)):
+        return None
+    M = len(markers)
+    if not (1 <= M <= MAX_BUILD_BEATS) or [k for k, _ in markers] != list(range(1, M + 1)):
+        return None
+    segments = [p.strip() for p in _REVEAL_MARKER_RE.split(body)]
+    if len(segments) != M + 1 or any(not s for s in segments):
+        return None
+    return {"segments": segments, "markers": markers}
+
+
+def _slide_notes(slide) -> str:
+    return slide.notes_slide.notes_text_frame.text if slide.has_notes_slide else ""
+
+
+def _set_slide_notes(slide, text: str) -> None:
+    slide.notes_slide.notes_text_frame.text = text
+
+
+def _set_shape_hidden(shp, hidden: bool) -> None:
+    """Toggle the native OOXML hidden attribute (p:cNvPr@hidden) — for every shape kind
+    (sp/pic/graphicFrame/grpSp/cxnSp) the cNvPr is the first child of the first child."""
+    cNvPr = shp._element[0][0]
+    if hidden:
+        cNvPr.set("hidden", "1")
+    else:
+        cNvPr.attrib.pop("hidden", None)
+
+
+def _duplicate_slide(prs, index: int):
+    """Insert an exact duplicate of prs.slides[index] immediately BEFORE it and return it.
+    Shape XML is deep-copied; relationships (images/charts/media) are re-created on the new part
+    pointing at the SAME underlying parts (no file-size blowup), with r:id references rewritten
+    when the new part assigns a different rId."""
+    import copy as _copy
+    from pptx.oxml.ns import qn
+    src = prs.slides[index]
+    dup = prs.slides.add_slide(src.slide_layout)
+    # Drop the placeholder shapes the layout seeded, then copy every shape element verbatim.
+    for shp in list(dup.shapes):
+        shp._element.getparent().remove(shp._element)
+    for el in list(src._element.spTree)[2:]:      # [0]=nvGrpSpPr [1]=grpSpPr, rest are shapes
+        dup._element.spTree.append(_copy.deepcopy(el))
+    # Slide-level background, if any.
+    src_bg = src._element.cSld.find(qn("p:bg"))
+    if src_bg is not None and dup._element.cSld.find(qn("p:bg")) is None:
+        dup._element.cSld.insert(0, _copy.deepcopy(src_bg))
+    # Re-create the source slide's relationships on the duplicate.
+    id_map: dict[str, str] = {}
+    for rId, rel in src.part.rels.items():
+        # Skip the layout (the duplicate already has its own) and the NOTES relationship — copying
+        # it would make every beat share the source's one notes part, so the last notes write would
+        # win on all of them. Leaving it out lets each beat lazily create its own notes part.
+        if "slideLayout" in rel.reltype or "notesSlide" in rel.reltype:
+            continue
+        if rel.is_external:
+            new_rId = dup.part.rels.get_or_add_ext_rel(rel.reltype, rel.target_ref)
+        else:
+            new_rId = dup.part.relate_to(rel.target_part, rel.reltype)
+        if new_rId != rId:
+            id_map[rId] = new_rId
+    if id_map:
+        RNS = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}"
+        for el in dup._element.iter():
+            for attr, val in list(el.attrib.items()):
+                if attr.startswith(RNS) and val in id_map:
+                    el.attrib[attr] = id_map[val]
+    # add_slide appended at the end — move the reference to sit right before the source slide.
+    sldIdLst = prs.slides._sldIdLst
+    ids = list(sldIdLst)
+    new_id = ids[-1]
+    sldIdLst.remove(new_id)
+    sldIdLst.insert(index, new_id)
+    return dup
+
+
+def _build_cue(group: int, beat: int, total: int, desc: str = "") -> str:
+    return f"(build {group} | beat {beat}/{total}" + (f" | {desc}" if desc else "") + ")"
+
+
+def explode_build_slides(pptx_path: str) -> int:
+    """Expand every well-formed build slide into its beats, IN PLACE. Beat k is a duplicate of the
+    authored slide with shapes not visible at k carrying hidden="1"; its notes are that beat's clean
+    narration segment plus a `(build G | beat B/V | desc)` cue line. The authored slide itself
+    becomes the last beat (its transients hidden too). Returns the number of physical slides added.
+    Slides with no reveal tags or a malformed script are left untouched (static)."""
+    prs = Presentation(pptx_path)
+    targets = []   # (index, script, tagged_ranges_ok)
+    for i, slide in enumerate(prs.slides):
+        script = parse_reveal_script(_slide_notes(slide))
+        if not script:
+            continue
+        M = len(script["markers"])
+        tag_lists = [r for r in (_reveal_ranges(sh.name) for sh in slide.shapes) if r]
+        if not tag_lists:
+            continue
+        if any(first > M or (last is not None and last > M) for rl in tag_lists for first, last in rl):
+            continue   # a tag references a beat past the last marker — malformed, stay static
+        targets.append((i, script))
+    if not targets:
+        return 0
+    group_of = {i: g + 1 for g, (i, _) in enumerate(targets)}
+    added = 0
+    for i, script in reversed(targets):   # reverse so insertions don't shift pending indices
+        g = group_of[i]
+        M = len(script["markers"])
+        V = M + 1
+        for _ in range(M):                # M duplicates before the original → beats 0..M-1
+            _duplicate_slide(prs, i)
+            added += 1
+        for k in range(V):                # beats live at indices i..i+M; original is last (beat M)
+            beat_slide = prs.slides[i + k]
+            for shp in beat_slide.shapes:
+                rl = _reveal_ranges(shp.name)
+                if rl is not None:
+                    _set_shape_hidden(shp, not _shape_visible_at(rl, k))
+            desc = script["markers"][k - 1][1] if k >= 1 else ""
+            _set_slide_notes(beat_slide, script["segments"][k] + "\n\n" + _build_cue(g, k + 1, V, desc))
+    prs.save(pptx_path)
+    return added
+
+
+def collapse_build_slides(pptx_path: str) -> int:
+    """Lossless inverse of explode_build_slides, for re-ingesting a downloaded/edited deck: drop
+    every non-final beat, un-hide all shapes on the kept slide, and rebuild the original [REVEAL]
+    narration script from the beats' notes + cue descriptions. Slides without build cues are
+    untouched; incomplete groups (user deleted beats in PowerPoint) keep their last surviving beat.
+    Returns the number of physical slides removed."""
+    from pptx.oxml.ns import qn
+    prs = Presentation(pptx_path)
+    # Collect group membership in slide order.
+    members: dict[int, list[tuple[int, int, int, str, str]]] = {}   # g -> [(idx, beat, total, desc, segment)]
+    for i, slide in enumerate(prs.slides):
+        notes = _slide_notes(slide)
+        m = _BUILD_CUE_RE.search(notes)
+        if not m:
+            continue
+        seg = _BUILD_CUE_RE.sub("", notes).strip()
+        members.setdefault(int(m.group(1)), []).append(
+            (i, int(m.group(2)), int(m.group(3)), (m.group(4) or "").strip(), seg))
+    if not members:
+        return 0
+    to_remove: list[int] = []
+    for g, beats in members.items():
+        beats.sort(key=lambda b: b[1])
+        final_idx = beats[-1][0]          # highest surviving beat = best-effort final
+        final_slide = prs.slides[final_idx]
+        for shp in final_slide.shapes:
+            _set_shape_hidden(shp, False)
+        # Rebuild the narration script: seg0 [[1|d1]] seg1 ... using each beat's segment + desc.
+        script = "[REVEAL] " + beats[0][4]
+        for _, beat_no, _, desc, seg in beats[1:]:
+            script += f" [[{beat_no - 1} | {desc}]] {seg}"
+        _set_slide_notes(final_slide, script if len(beats) > 1 else beats[0][4])
+        to_remove.extend(idx for idx, *_ in beats[:-1])
+    # Drop the removed slides' parts + references (reverse order keeps indices valid).
+    sldIdLst = prs.slides._sldIdLst
+    ids = list(sldIdLst)
+    for idx in sorted(to_remove, reverse=True):
+        sld_id = ids[idx]
+        rId = sld_id.get(qn("r:id"))
+        prs.part.drop_rel(rId)
+        sldIdLst.remove(sld_id)
+    prs.save(pptx_path)
+    return len(to_remove)
+
+
 # DrawingML preset-geometry (ST_ShapeType) aliases an LLM commonly emits that
 # are NOT valid enum values. An invalid prst= value is a schema violation, not
 # a structural one: LibreOffice silently drops the shape (invisible), while

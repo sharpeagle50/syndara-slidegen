@@ -130,7 +130,7 @@ summary_slide | section_divider | agenda_slide | quote_slide>
 **Visual elements** (what the learner SEES as the primary visual):
 - **Type:** <exactly one of: none | chart | flowchart | sequence_diagram |
   er_diagram | architecture_diagram | image | photo | icon_set |
-  screenshot | table>
+  screenshot | table | animation>
 - **Detailed description:** <REQUIRED if type is not 'none'. Describe the
   visual with enough specificity that a designer could build it without
   guessing. Include: all node/label text, arrow directions, data values,
@@ -158,6 +158,11 @@ summary_slide | section_divider | agenda_slide | quote_slide>
   other types.>
 - **Teaching purpose:** <One sentence: what does this visual teach that
   text alone cannot? Write 'N/A' if type is 'none'.>
+- **Animation:** <REQUIRED if type is 'animation'. Describe the MOTION: what
+  appears, moves, transforms, or is traced out over time, as a director's note
+  for an animator (e.g. "a dot descends a parabola in steps toward the minimum",
+  "vectors add tip-to-tail, then the resultant sweeps in"). Geometry, graphs,
+  processes, and step-by-step motion only — no equations. Write 'N/A' otherwise.>
 
 **On-slide text** (COMPLETE list of every word visible on the slide):
 - <exact text item 1 — e.g. "3 AI coding assistants compared">
@@ -176,7 +181,15 @@ slide might only need 10–20 words; a dense concept slide might need 250):
 language — use "you", "we", "let's". Include: concrete explanations,
 real examples, step-by-step tool walkthroughs, exact commands/prompts,
 transitions to the next slide, why this matters, common mistakes.
-Cite every non-obvious fact inline: `[source: url-or-name]`.>
+Cite every non-obvious fact inline: `[source: url-or-name]`.
+OPTIONAL — if this slide uses a PROGRESSIVE BUILD (see the section below),
+write the notes as the build SCRIPT instead: start with [REVEAL] and place
+[[N | what appears/disappears]] markers inline at the exact word each beat
+starts. Same narration rules apply; the script must read as one continuous
+narration.>
+
+**Physical slides:** <ONLY on build slides: "1 + <M> beats = <M+1>" where M
+is the number of [[N | …]] markers. Omit this line entirely on normal slides.>
 
 **Sources:**
 - <url 1>
@@ -299,6 +312,78 @@ HEURISTICS
   slides: one showing only the question + options (no answer highlighted),
   and one showing the same content with the correct answer revealed. This
   creates a click-to-reveal animation in the downloadable PPTX.
+
+PROGRESSIVE BUILDS (optional per-slide animation — YOU choreograph it here)
+You may animate a slide so its elements fade in and out in sync with the
+narration instead of all appearing at once. ALL animation thinking happens in
+THIS plan; the builder only executes your script. It is OPTIONAL and OFF by
+default — most slides should stay static.
+
+HOW IT WORKS (the mechanics your script must respect):
+- You design ONE final slide layout. Each animation beat is that same slide
+  with some elements shown or hidden — elements NEVER move, resize, or
+  restyle between beats, and the only effect is fade in / fade out.
+- Every [[N | …]] marker in the script creates ONE additional physical slide
+  in the deck. The narration is cut at the markers: the text before the first
+  marker is spoken while the base shows; the text after marker N is spoken
+  while beat N shows. A reveal fires exactly at the word where you place its
+  marker, and how much text sits between two markers is what sets the pacing —
+  a few words = a quick beat, a paragraph = a long dwell.
+- Write the script in the Speaker notes: start with [REVEAL], then narration
+  with inline markers `[[1 | show: the three stage cards]]`, numbered 1,2,3,…
+  in order. After the pipe, describe in plain words what appears and/or
+  disappears — that description is for the builder and any human reviewer.
+
+NARRATION CONTINUITY (critical): the script is ONE continuous narration read
+straight through — beats are NOT new slides to the listener. Never re-introduce
+the slide at a marker, never recap what earlier beats already explained, never
+say "as we just saw" or "now on this slide". Each segment continues the thought
+mid-stream and narrates only what's new or what changed.
+
+YOUR CREATIVE PALETTE (full freedom — any choreography these moves compose):
+- reveal one element, or several together as one beat
+- hide one or several elements mid-slide (clear the stage, then build fresh)
+- transient elements: show something for one beat, then it leaves
+- re-entries: an element leaves and comes back later
+- staged replacement: hide version A while showing version B (a "morph")
+- and most often: no animation at all — a good static slide beats a
+  pointless build
+Guardrails: every beat needs narration words (that's its timing); at most ~6
+beats per slide; transients and re-entries are seasoning, not the norm; the
+slide's FINAL state must stand on its own as a complete, correct slide.
+LAYOUT AWARENESS: editors and QA see the slide with ALL staged elements
+rendered at once. Prefer giving each element its own clear region; when a
+transient or replacement deliberately shares a region with other content
+(e.g. version B where version A sits), say so explicitly in that marker's
+description ("replaces A in place") so reviewers know it's intentional.
+Also: the **On-slide text** list must include EVERY element that ever
+appears — including transients and both halves of a replacement — since the
+builder authors them all into the one final layout.
+
+COMPLETE EXAMPLE of a build slide's Speaker notes (three beats):
+  [REVEAL] A monthly close has three stages, and the handoffs between them
+  are where the errors live. [[1 | show: the three stage cards]] Collect,
+  reconcile, report — always in that order. [[2 | show: red handoff arrows
+  between the cards]] Between each pair there is a handoff, and every handoff
+  is a chance for a transaction to slip through. [[3 | hide: red arrows;
+  show: checklist panel on the right]] So we replace every handoff with a
+  written checklist — and the errors stop slipping.
+(That slide's **Physical slides:** line reads "1 + 3 beats = 4".)
+
+WHEN TO ANIMATE: strongest on text-heavy slides (reveal each point as it's
+narrated so the learner reads only the current one) and element-dense diagrams
+that would overwhelm if shown at once. Do NOT animate title slides, quotes,
+single-visual slides, references, or question_slides (those have their own
+reveal). NEVER put a build on a slide whose Visual **Type:** is `animation`
+(the full-bleed animation clip covers the slide — the two effects conflict).
+Always your judgment — when unsure, stay static.
+
+SLIDE BUDGET: builds are free but consume slide count — a slide with M markers
+occupies M+1 physical slides of this module's target. Add the
+**Physical slides:** line on every build slide and count builds toward the
+deck-length range. If you animate heavily, use fewer canonical slides; if the
+material needs many slides AND heavy animation, the deck needs a higher slide
+count — never exceed the range.
 """
 
 
@@ -338,6 +423,8 @@ class SlidePlannerAgent(BaseAgent):
         available_tools: list[str] | None = None,
         curated_lookup=None,
         image_ctx: dict | None = None,
+        slide_animations: bool = False,
+        animation_budget: int = 4,
     ) -> dict:
         """Return a slide-by-slide content plan (markdown) for the given outline.
 
@@ -476,6 +563,23 @@ NOTE: Web image insertion is not enabled for this course. Use only
 generated visuals (charts, flowcharts, diagrams, icon sets). If you
 specify type image/photo/screenshot, describe what the visual should
 depict and the builder will create a suitable alternative diagram.
+"""
+        if slide_animations:
+            user_msg += f"""
+ANIMATIONS ENABLED — for up to {animation_budget} slide(s) in THIS module, you may set
+**Type:** animation to make that slide a full-screen animated explainer (rendered as a short
+video and shown in place of a static slide). Use it ONLY where MOTION genuinely teaches better
+than a static diagram: something building up, moving, transforming, or unfolding step by step —
+gradient descent stepping to a minimum, vectors adding tip-to-tail, a sorting algorithm swapping,
+a process flowing through stages, a geometric construction being traced. For each animation slide,
+fill in the **Animation:** field with a concrete director's note describing the motion, and write
+the slide's speaker notes as the NARRATION that plays over it. Do NOT animate static comparisons,
+plain bullet lists, or slides where a chart/diagram already says it best. Be selective — a couple
+of great animations beat many mediocre ones. Never exceed {animation_budget} animation slides here.
+"""
+        else:
+            user_msg += """
+NOTE: Slide animations are not enabled — never set Type to 'animation'.
 """
         if assessment_questions:
             domains = set()
@@ -780,11 +884,18 @@ depict and the builder will create a suitable alternative diagram.
         if web_images:
             print(f"[SlidePlannerAgent] {len(_found_images)} image(s) found during planning; "
                   f"{len(image_urls)} image slide(s) in plan", flush=True)
+        # Cap at the paid budget: if the model marked more animation slides than the creator bought,
+        # keep the first N (in slide order) so we never render — or bill — beyond what was purchased.
+        animations = (SlidePlannerAgent.extract_animation_intents(md)[:max(0, animation_budget)]
+                      if slide_animations else [])
+        if slide_animations and animations:
+            print(f"[SlidePlannerAgent] {len(animations)} animation slide(s) in plan", flush=True)
         return {
             "markdown": strip_em_dashes(md),
             "sources": sources,
             "image_urls": image_urls,
             "found_images": _found_images,
+            "animations": animations,
             "_image_dir": _img_dir,            # caller cleans this up (unless shared)
             "_image_dir_shared": _img_shared,  # True = a course-shared dir; caller must NOT clean per-module
             "module_position": mod_pos,
@@ -859,6 +970,11 @@ depict and the builder will create a suitable alternative diagram.
                     intent = (f'Planned slide title: "{title}". This is a TEXT-ONLY slide '
                               "with no primary visual — do NOT apply the visual-accuracy "
                               "check to it.")
+                elif vtype == "animation":
+                    # The static build is just a title/poster; the animation is overlaid later.
+                    intent = (f'Planned slide title: "{title}". This is an ANIMATION slide — the '
+                              "static build is a clean title/poster and the motion is added "
+                              "separately, so do NOT apply the visual-accuracy check to it.")
                 else:
                     dmatch = re.search(
                         r'\*\*Detailed description:\*\*\s*(.+?)(?:\n\s*-\s*\*\*|\n\n|\Z)', section, re.S
@@ -868,6 +984,18 @@ depict and the builder will create a suitable alternative diagram.
                         intent = f'Planned slide title: "{title}". Planned visual ({vtype}): {visual}'
                     else:
                         intent = f'Planned slide title: "{title}". Planned visual type: {vtype}.'
+                # Progressive build: QA inspects the CANONICAL slide, where every staged element
+                # renders at once even though beats show them at different times — so elements may
+                # legitimately share a region (a transient over the diagram, a replacement on top of
+                # what it replaces). Tell QA not to flag those as overlap defects.
+                _n_markers = len(re.findall(r'\[\[\s*\d+\s*\|', section))
+                if _n_markers:
+                    intent += (f" PROGRESSIVE BUILD ({_n_markers + 1} beats): elements on this slide "
+                               "appear/disappear at different narration beats, but they ALL render at "
+                               "once in this image — overlapping or crowded elements here may be "
+                               "intentional staging (a transient callout, a staged replacement). Do "
+                               "NOT flag overlapping_elements or layout crowding on this slide unless "
+                               "text is unreadable within a single element.")
                 intents[render_idx] = intent
                 render_idx += 1
                 # A question_slide renders as two physical slides (question + answer reveal);
@@ -878,6 +1006,46 @@ depict and the builder will create a suitable alternative diagram.
             return intents
         except Exception:
             return {}
+
+    @staticmethod
+    def extract_animation_intents(md: str) -> list[dict]:
+        """Parse the plan into a list of {rendered_index, title, description} for slides the planner
+        marked Type: animation. Uses the SAME render-index mapping as extract_slide_intents (a
+        question_slide renders as two physical slides), so each animation attaches to the correct
+        rendered slide. A list (not an int-keyed dict) so it survives JSON storage. Best-effort."""
+        import re
+        if not md:
+            return []
+        try:
+            headings = re.findall(r'^##\s+Slide\s+\d+\s*[—–-]?\s*([^\n]*)', md, flags=re.MULTILINE)
+            sections = re.split(r'^##\s+Slide\s+\d+', md, flags=re.MULTILINE)[1:]
+            out: list[dict] = []
+            render_idx = 0
+            for i, section in enumerate(sections):
+                title = (headings[i] if i < len(headings) else "").strip("—– \t")
+                tmatch = re.search(r'\*\*Type:\*\*\s*([A-Za-z_]+)', section)
+                vtype = (tmatch.group(1).strip().lower() if tmatch else "none")
+                if vtype == "animation":
+                    # Stop at the next bullet (`\n- `), the next bold header (`\n**`, e.g.
+                    # **On-slide text**), a blank line, or end — Animation is the last Visual bullet.
+                    _stop = r'(?:\n\s*-\s|\n\s*\*\*|\n\n|\Z)'
+                    amatch = re.search(r'\*\*Animation:\*\*\s*(.+?)' + _stop, section, re.S)
+                    desc = re.sub(r'\s+', ' ', amatch.group(1)).strip() if amatch else ""
+                    if desc.lower() in ("", "n/a", "none"):   # fall back to the detailed description
+                        dmatch = re.search(r'\*\*Detailed description:\*\*\s*(.+?)' + _stop, section, re.S)
+                        desc = re.sub(r'\s+', ' ', dmatch.group(1)).strip() if dmatch else ""
+                    if desc:
+                        out.append({"rendered_index": render_idx, "title": title, "description": desc})
+                render_idx += 1
+                if re.search(r'\*\*Layout:\*\*\s*`?\s*question_slide', section, re.I):
+                    render_idx += 1   # answer-reveal twin; the animation stays on the first physical slide
+                # Progressive build: each [[N | …]] marker in the slide's script becomes one extra
+                # physical beat slide in the PUBLISHED deck (animation clips attach post-explosion),
+                # so later slides' rendered indices shift by the marker count.
+                render_idx += len(re.findall(r'\[\[\s*\d+\s*\|', section))
+            return out
+        except Exception:
+            return []
 
     @staticmethod
     def _extract_sources(md: str) -> list[str]:

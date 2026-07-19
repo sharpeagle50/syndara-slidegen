@@ -155,6 +155,19 @@ def report_gpu_usage(gpu: str, seconds: float) -> None:
         pass
 
 
+def report_render_usage(seconds: float) -> None:
+    """Report Manim animation render time (wall-clock seconds) on Modal CPU, priced per-second in
+    the private layer (Concept Animation). No-op when no run sink is open; never raises."""
+    sink = _cost_sink.get()
+    if sink is None:
+        return
+    try:
+        sink.append({"kind": "render", "stage": "animation_render", "module": _cost_module.get(),
+                     "seconds": float(seconds or 0.0)})
+    except (TypeError, ValueError):
+        pass
+
+
 def report_exact_cost(label: str, usd) -> None:
     """Record an exact dollar cost (the agentic builder's total_cost_usd)."""
     sink = _cost_sink.get()
