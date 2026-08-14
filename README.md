@@ -26,20 +26,19 @@ The `tools/` package provides the shared infrastructure: hand-designed slide
 layouts, a Node/PptxGenJS bridge, diagram/chart renderers, `.pptx` parsing, and
 icon rendering (react-icons).
 
-## Concept animations (Manim)
+## Animated slides (Manim)
 
-The `animation/` package lets the AI produce full-motion animated explainers by
-**writing [Manim](https://www.manim.community/) code and iterating on what it
-renders** — the same generate → render → look → self-correct loop as the slide
-builder, pointed at an animation engine instead of a deck:
+A slide plan can mark a slide as `Type: animation`. The `animation/` package
+turns that slide into a rendered full-bleed animation clip by **writing
+[Manim](https://www.manim.community/) code and iterating on what it renders**
+— the same generate → render → look → self-correct loop as the slide builder,
+pointed at an animation engine:
 
 | Stage | Component | What it does |
 |-------|-----------|--------------|
-| Storyboard | `StoryboardAgent` | Plain-English concept → an ordered beat sheet (pedagogy + pacing) |
-| Build | `ManimBuilderAgent` | One beat → Manim Scene code → rendered MP4; inspects its own keyframes and fixes runtime errors and layout defects |
+| Build | `ManimBuilderAgent` | One animation brief → Manim Scene code → rendered MP4; inspects its own keyframes and fixes runtime errors and layout defects |
 | Select | `AnimationSelectorAgent` | Picks which built slides deserve a full-bleed animation when none were marked at plan time |
 | Render | `manim_render` | Modal-or-local render dispatch; runs LLM-written code with credential-scrubbed env, injects pre-generated narration so no API key exists inside the render |
-| Assemble | `manim_assemble` | Pure ffmpeg: per-beat clips + narration → one MP4 (freeze-frame holds, silence padding) |
 
 Install the extra deps with `pip install -e ".[animation]"` (Manim needs
 Python ≥ 3.11 and the Cairo/Pango toolchain). Rendering works with a local

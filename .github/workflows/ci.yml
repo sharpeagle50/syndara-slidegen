@@ -31,10 +31,8 @@ jobs:
           from deckgen.tools.image_fetch import download_plan_images
           from deckgen.tools.qa_render import render_all_slides
           from deckgen.tools.render_tool import render_matplotlib_chart
-          from deckgen.animation import (
-              StoryboardAgent, ManimBuilderAgent, AnimationSelectorAgent,
-          )
-          from deckgen.animation import manim_assemble, manim_render
+          from deckgen.animation import ManimBuilderAgent, AnimationSelectorAgent
+          from deckgen.animation import manim_render
           assert len(LAYOUTS) >= 9
           assert len(get_palette('midnight')) >= 8
           print('imports OK')
