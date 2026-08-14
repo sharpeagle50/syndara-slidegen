@@ -176,9 +176,8 @@ same MIT terms as this project. No separate CLA is required.
 ## Acknowledgments
 
 The concept-animation engine exists because **Vishal Yalla** suggested letting
-the AI use Manim to make animations — handing the model a real animation
-engine to write code against, rather than limiting it to static slides. That
-idea became the `animation/` package. Thank you, Vishal.
+the AI use Manim to make animations. That idea became the `animation/`
+package. Thank you, Vishal.
 
 ## License
 

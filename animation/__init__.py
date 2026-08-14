@@ -15,9 +15,8 @@ The pipeline mirrors the slide builder's generate → render → look → fix lo
 - manim_runner      — standalone Modal app for the heavy Manim/Cairo/Pango toolchain
                       (deploy separately; never imported by the pipeline)
 
-The idea of handing the AI a real animation engine — letting it write Manim code against a
-renderer and iterate on what it sees — was suggested by Vishal Yalla. See the README's
-Acknowledgments.
+The idea of letting the AI use Manim to make animations was suggested by Vishal Yalla. See the
+README's Acknowledgments.
 """
 from .storyboard import StoryboardAgent
 from .manim_builder import ManimBuilderAgent
