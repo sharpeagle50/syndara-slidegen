@@ -37,7 +37,6 @@ builder, pointed at an animation engine instead of a deck:
 |-------|-----------|--------------|
 | Storyboard | `StoryboardAgent` | Plain-English concept → an ordered beat sheet (pedagogy + pacing) |
 | Build | `ManimBuilderAgent` | One beat → Manim Scene code → rendered MP4; inspects its own keyframes and fixes runtime errors and layout defects |
-| Direct | `DirectorAgent` | Coherence layer for full-length (2–20 min) videos: one narrative arc, a persistent visual language |
 | Select | `AnimationSelectorAgent` | Picks which built slides deserve a full-bleed animation when none were marked at plan time |
 | Render | `manim_render` | Modal-or-local render dispatch; runs LLM-written code with credential-scrubbed env, injects pre-generated narration so no API key exists inside the render |
 | Assemble | `manim_assemble` | Pure ffmpeg: per-beat clips + narration → one MP4 (freeze-frame holds, silence padding) |

@@ -32,8 +32,7 @@ jobs:
           from deckgen.tools.qa_render import render_all_slides
           from deckgen.tools.render_tool import render_matplotlib_chart
           from deckgen.animation import (
-              StoryboardAgent, ManimBuilderAgent, DirectorAgent,
-              AnimationSelectorAgent, flatten_beats,
+              StoryboardAgent, ManimBuilderAgent, AnimationSelectorAgent,
           )
           from deckgen.animation import manim_assemble, manim_render
           assert len(LAYOUTS) >= 9
