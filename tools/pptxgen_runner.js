@@ -180,6 +180,28 @@ rl.on('line', (line) => {
                 if (wordCount > 25) {
                     warnings.push(`Slide ${i + 1}: ~${wordCount} words on surface (target ≤20). Trim text.`);
                 }
+
+                // Off-canvas check for TEXT elements: clipped text is a guaranteed-critical
+                // visual-QA defect that costs a full rebuild pass to fix later — flagging it
+                // here lets the builder correct it in the same turn it authored the slide.
+                // Text-bearing objects only (full-bleed decorative rects legitimately touch
+                // the edges), and only when x/y/w/h are all plain numbers (inches) — percent
+                // strings and autosized boxes are skipped rather than guessed at.
+                for (const obj of (pptx.slides[i]._slideObjects || [])) {
+                    if (!obj.text) continue;
+                    const o = obj.options || {};
+                    if ([o.x, o.y, o.w, o.h].some(v => typeof v !== 'number')) continue;
+                    const EPS = 0.01;  // exact-fit boxes (x=0, w=13.33) are fine
+                    if (o.x < -EPS || o.y < -EPS
+                            || o.x + o.w > 13.33 + EPS || o.y + o.h > 7.5 + EPS) {
+                        const snippet = (Array.isArray(obj.text)
+                            ? obj.text.map(t => t.text || '').join(' ')
+                            : String(obj.text)).slice(0, 40);
+                        warnings.push(`Slide ${i + 1}: text box "${snippet}" at x=${o.x}, y=${o.y}, `
+                            + `w=${o.w}, h=${o.h} extends beyond the 13.33x7.5in canvas — it will `
+                            + `render clipped. Move or shrink it now.`);
+                    }
+                }
             }
 
             const resp = { success: true, slide_count: pptx.slides.length };

@@ -26,6 +26,28 @@ The `tools/` package provides the shared infrastructure: hand-designed slide
 layouts, a Node/PptxGenJS bridge, diagram/chart renderers, `.pptx` parsing, and
 icon rendering (react-icons).
 
+## Concept animations (Manim)
+
+The `animation/` package lets the AI produce full-motion animated explainers by
+**writing [Manim](https://www.manim.community/) code and iterating on what it
+renders** — the same generate → render → look → self-correct loop as the slide
+builder, pointed at an animation engine instead of a deck:
+
+| Stage | Component | What it does |
+|-------|-----------|--------------|
+| Storyboard | `StoryboardAgent` | Plain-English concept → an ordered beat sheet (pedagogy + pacing) |
+| Build | `ManimBuilderAgent` | One beat → Manim Scene code → rendered MP4; inspects its own keyframes and fixes runtime errors and layout defects |
+| Direct | `DirectorAgent` | Coherence layer for full-length (2–20 min) videos: one narrative arc, a persistent visual language |
+| Select | `AnimationSelectorAgent` | Picks which built slides deserve a full-bleed animation when none were marked at plan time |
+| Render | `manim_render` | Modal-or-local render dispatch; runs LLM-written code with credential-scrubbed env, injects pre-generated narration so no API key exists inside the render |
+| Assemble | `manim_assemble` | Pure ffmpeg: per-beat clips + narration → one MP4 (freeze-frame holds, silence padding) |
+
+Install the extra deps with `pip install -e ".[animation]"` (Manim needs
+Python ≥ 3.11 and the Cairo/Pango toolchain). Rendering works with a local
+`manim` binary out of the box; `animation/manim_runner.py` is an optional
+standalone [Modal](https://modal.com) app you can deploy so the heavy render
+toolchain stays off your application image.
+
 ## Requirements
 
 **Core (needed for any deck build):**
@@ -150,6 +172,13 @@ engine just gives you clean seams to pause at.
 Contributions are accepted under the MIT license (inbound = outbound): by
 submitting a pull request, you agree your contribution is licensed under the
 same MIT terms as this project. No separate CLA is required.
+
+## Acknowledgments
+
+The concept-animation engine exists because **Vishal Yalla** suggested letting
+the AI use Manim to make animations — handing the model a real animation
+engine to write code against, rather than limiting it to static slides. That
+idea became the `animation/` package. Thank you, Vishal.
 
 ## License
 

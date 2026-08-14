@@ -112,15 +112,17 @@ def report_usage(label: str, model: str, usage) -> None:
         pass
 
 
-def report_tts_usage(chars: int, model: str) -> None:
-    """Report OpenAI TTS character usage (priced separately in the private
-    layer). No-op when no run sink is open; never raises."""
+def report_tts_usage(chars: int, model: str, *, external: bool = False) -> None:
+    """Report TTS character usage (priced separately in the private layer). No-op when no run
+    sink is open; never raises. external=True marks usage billed to the CREATOR'S own account
+    (own-key ElevenLabs): recorded and priced as an external ESTIMATE for the run detail view,
+    never counted in Syndara COGS totals."""
     sink = _cost_sink.get()
     if sink is None:
         return
     try:
         sink.append({"kind": "tts", "stage": "tts", "module": _cost_module.get(),
-                     "model": model, "chars": int(chars or 0)})
+                     "model": model, "chars": int(chars or 0), "external": bool(external)})
     except (TypeError, ValueError):
         pass
 
@@ -245,6 +247,15 @@ STYLE_RULE = (
     "Never use em dashes. Do not lean on hyphens as a substitute either. Prefer "
     "commas, periods, colons, or rephrasing the sentence, mixed naturally so no "
     "single punctuation mark dominates."
+    "\n\nWRITING STYLE (required): Be concise and direct. Every sentence earns its place: "
+    "no filler, no meandering setup, no restating what was just said, no decorative "
+    "vocabulary when a plain word works. Use technical terms where they are the accurate "
+    "choice; never use a fancy word just to sound sophisticated."
+    "\n\nREFERENCES (required): Never refer to content by position number: no \"Module 3\", "
+    "\"in the last module\", \"Section 2\", \"the previous deck\". Numbering is not stable "
+    "(order changes, and a module is often downloaded or taken on its own), and it tells the "
+    "learner nothing. When you need to point back, name the TOPIC instead: \"when we covered "
+    "buffer solutions\" rather than \"in Module 2\"."
 )
 
 # Visual-ness spectrum for slide layouts (1 = most visual … 5 = most text). The create-page slider picks
@@ -463,6 +474,31 @@ def text_from_response(response) -> str:
     )
 
 
+# A backslash that does NOT begin a valid JSON escape (\" \\ \/ \b \f \n \r \t \uXXXX).
+# LLMs writing math/code-heavy content inside JSON strings routinely slip a single-backslash
+# LaTeX command (\lambda, \(, \mu) — one slip anywhere invalidates the whole document.
+_INVALID_JSON_ESCAPE_RE = re.compile(r'\\(?!["\\/bfnrt]|u[0-9a-fA-F]{4})')
+
+
+def loads_lenient(s: str) -> dict:
+    """json.loads with two escalating fallbacks for LLM-authored JSON: first allow raw
+    control characters inside strings (long multi-line cell/prompt strings), then double
+    every backslash that isn't a valid escape sequence (the LaTeX slip). Valid escape
+    sequences are never touched, so a well-formed document parses identically to strict.
+    NOTE: a slipped backslash that happens to FORM a valid escape (\\frac -> formfeed,
+    \\theta -> tab) parses fine and can't be detected here — that residual corruption is
+    the model's escaping error, not recoverable at parse time."""
+    try:
+        return json.loads(s)
+    except json.JSONDecodeError:
+        pass
+    try:
+        return json.loads(s, strict=False)
+    except json.JSONDecodeError:
+        pass
+    return json.loads(_INVALID_JSON_ESCAPE_RE.sub(r"\\\\", s), strict=False)
+
+
 def extract_json(text: str) -> dict:
     """Robustly extract a JSON object from an LLM response.
 
@@ -471,6 +507,7 @@ def extract_json(text: str) -> dict:
       - fenced ```json blocks
       - JSON embedded in prose ("Here's the plan: {...}")
       - trailing prose after the JSON
+      - invalid escapes / raw control chars in strings (via loads_lenient)
       - empty/missing responses (raises with a useful message)
     """
     if not text or not text.strip():
@@ -509,10 +546,10 @@ def extract_json(text: str) -> dict:
                 break
     if end < 0:
         raise ValueError(f"Unbalanced JSON in LLM response (first 200 chars): {t[:200]!r}")
-    return json.loads(t[start:end])
+    return loads_lenient(t[start:end])
 
 SKILLS_DIR = Path(__file__).parent.parent / "skills"
-MODEL_DEFAULT = os.environ.get("SYNDARA_MODEL", "claude-opus-4-8")
+MODEL_DEFAULT = os.environ.get("SYNDARA_MODEL", "claude-opus-5")
 
 
 def load_skill(name: str) -> str:
@@ -522,8 +559,13 @@ def load_skill(name: str) -> str:
     return ""
 
 
-RATE_LIMIT_MAX_RETRIES = 5
-RATE_LIMIT_BASE_DELAY = 15  # seconds
+# 12 modules build concurrently, each firing plan + ~30 vision-QA Opus calls, so a sustained 429
+# window is normal under load. The old 5-retry / 15s budget capped total backoff at ~7.75 min and
+# aborted the whole stage (and thus the module) past it. 8 retries with a 300s ceiling ≈ 20 min of
+# backoff, and _retry_api_call also honors the server's Retry-After when it's longer.
+RATE_LIMIT_MAX_RETRIES = int(os.environ.get("SYNDARA_RATE_LIMIT_RETRIES", "8"))
+RATE_LIMIT_BASE_DELAY = 15   # seconds
+RATE_LIMIT_MAX_DELAY = 300   # per-attempt ceiling
 
 
 def _retry_api_call(fn, *, label: str, model: str):
@@ -550,7 +592,7 @@ def _retry_api_call(fn, *, label: str, model: str):
             if hasattr(e, "response") and e.response is not None:
                 retry_after = e.response.headers.get("retry-after")
             delay = float(retry_after) if retry_after else RATE_LIMIT_BASE_DELAY * (2 ** (attempt - 1))
-            delay = min(delay, 120)
+            delay = min(delay, RATE_LIMIT_MAX_DELAY)
             print(
                 f"[RateLimit] 429 hit · agent={label} model={model} "
                 f"attempt={attempt}/{RATE_LIMIT_MAX_RETRIES} · "
@@ -569,7 +611,7 @@ def _retry_api_call(fn, *, label: str, model: str):
         except anthropic.APIStatusError as e:
             if e.status_code == 529:
                 delay = RATE_LIMIT_BASE_DELAY * (2 ** (attempt - 1))
-                delay = min(delay, 120)
+                delay = min(delay, RATE_LIMIT_MAX_DELAY)
                 print(
                     f"[RateLimit] 529 overloaded · agent={label} model={model} "
                     f"attempt={attempt}/{RATE_LIMIT_MAX_RETRIES} · "
@@ -595,7 +637,7 @@ def _retry_api_call(fn, *, label: str, model: str):
             # silently. No timeout values are changed — logging + the same
             # backoff used for 529s.
             delay = RATE_LIMIT_BASE_DELAY * (2 ** (attempt - 1))
-            delay = min(delay, 120)
+            delay = min(delay, RATE_LIMIT_MAX_DELAY)
             print(
                 f"[APIConnection] connection error · agent={label} model={model} "
                 f"attempt={attempt}/{RATE_LIMIT_MAX_RETRIES} · "
@@ -654,16 +696,16 @@ class BaseAgent:
     # the basic variants. Selecting the version from self.model keeps the model overridable
     # without silently breaking web research.
     _DYNAMIC_WEBTOOL_MODELS = (
-        "claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6",
+        "claude-opus-5", "claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6",
         "claude-sonnet-5", "claude-sonnet-4-6", "claude-fable-5", "claude-mythos-5",
     )
 
-    # Sonnet 5 turns adaptive thinking ON by default (effort=high) and returns a
-    # leading thinking block, whereas these agents were tuned for non-thinking
-    # Sonnet 4.6. Default to disabling it so text extraction + cost stay unchanged;
-    # a subclass that benefits from reasoning (e.g. the Reviewer) sets this True.
-    # Only Sonnet 5 is touched — Opus defaults to thinking-off, and Fable/Mythos 5
-    # reject {type:"disabled"} (thinking is always on there).
+    # Sonnet 5 AND Opus 5 turn adaptive thinking ON by default and return a leading thinking block,
+    # whereas these agents were tuned for the non-thinking behavior of their predecessors (Sonnet
+    # 4.6 / Opus 4.8, which defaulted thinking-off). Default to disabling it so output shape, text
+    # extraction, latency, and cost stay unchanged; a subclass that benefits from reasoning (e.g. the
+    # Reviewer, or the planner if we opt it in later) sets this True. Fable/Mythos 5 reject
+    # {type:"disabled"} (thinking is always on there) so they're left alone.
     adaptive_thinking: bool = False
 
     # Models where thinking is always on and {type:"disabled"} is rejected (400).
@@ -672,7 +714,12 @@ class BaseAgent:
     def _maybe_disable_thinking(self, kwargs: dict, *, force: bool = False) -> None:
         if self.model.startswith(self._ALWAYS_ON_THINKING):
             return  # can't disable on these — leave thinking on
-        if force or (self.model.startswith("claude-sonnet-5") and not self.adaptive_thinking):
+        # Sonnet 5 and Opus 5 both default adaptive thinking ON. Disable it unless the agent opted
+        # in (adaptive_thinking) so behavior matches the pre-5 models these prompts were tuned for.
+        # Safe because we never set effort (defaults to high) — on Opus 5, {type:"disabled"} +
+        # effort xhigh/max would 400, but disabled + high is allowed.
+        if force or (not self.adaptive_thinking
+                     and self.model.startswith(("claude-sonnet-5", "claude-opus-5"))):
             kwargs["thinking"] = {"type": "disabled"}
 
     def _supports_dynamic_webtools(self) -> bool:
@@ -890,32 +937,49 @@ class BaseAgent:
             # Append the full assistant turn (including any pause_turn content)
             current_messages.append({"role": "assistant", "content": merged_content})
 
-            # Execute each tool call
-            tool_results = []
-            for tu in tool_uses:
+            # Execute the turn's tool calls — CONCURRENTLY when the model batched several
+            # (a planner turn requesting 3 images used to run them back-to-back). Handlers
+            # are sync and independent (image fetches, chart renders, each with its own
+            # output path); results are re-ordered to match tool_uses, so the transcript
+            # the model sees is identical to the serial version.
+            def _run_one_tool(tu):
                 if tu.name not in self.allowed_tool_names:
                     # The model emitted a disallowed or malformed tool call (e.g. a stray
                     # 'invoke name=' from a botched tool-call format). Don't raise — that would
                     # abort the whole loop and fail the module on a single transient glitch.
                     # Hand the model an error result so it can self-correct and keep going.
                     print(f"[{label}]   ⚠ disallowed/unknown tool {tu.name!r}; returning error to model")
-                    result = {
+                    return {
                         "error": f"Tool '{tu.name}' is not available. "
                                  f"Use only these tools: {self.allowed_tool_names}."
                     }
-                else:
-                    handler = tool_handlers.get(tu.name)
-                    tool_start = _time.time()
-                    if not handler:
-                        result = {"error": f"No handler for tool {tu.name}"}
-                    else:
-                        try:
-                            result = handler(**tu.input)
-                        except Exception as e:
-                            result = {"error": str(e)}
-                    tool_elapsed = _time.time() - tool_start
-                    if tool_elapsed > 0.05:  # skip sub-50ms noise
-                        print(f"[{label}]   ← {tu.name} returned in {tool_elapsed:.1f}s")
+                handler = tool_handlers.get(tu.name)
+                if not handler:
+                    return {"error": f"No handler for tool {tu.name}"}
+                tool_start = _time.time()
+                try:
+                    result = handler(**tu.input)
+                except Exception as e:
+                    result = {"error": str(e)}
+                tool_elapsed = _time.time() - tool_start
+                if tool_elapsed > 0.05:  # skip sub-50ms noise
+                    print(f"[{label}]   ← {tu.name} returned in {tool_elapsed:.1f}s")
+                return result
+
+            # Whitelist gate: only tools that are stateless/independent may run concurrently.
+            # find_image fetches to a uuid'd path with a lock-guarded cache. Handlers like the
+            # layout-library builder's add_slide MUTATE the shared deck — running two of those
+            # concurrently would race python-pptx and scramble slide ORDER, so any turn
+            # containing a non-whitelisted tool executes serially, exactly as before.
+            _PARALLEL_SAFE_TOOLS = {"find_image"}
+            if len(tool_uses) > 1 and all(tu.name in _PARALLEL_SAFE_TOOLS for tu in tool_uses):
+                from concurrent.futures import ThreadPoolExecutor
+                with ThreadPoolExecutor(max_workers=min(4, len(tool_uses))) as _tex:
+                    _results = list(_tex.map(_run_one_tool, tool_uses))
+            else:
+                _results = [_run_one_tool(tu) for tu in tool_uses]
+            tool_results = []
+            for tu, result in zip(tool_uses, _results):
                 tool_results.append({
                     "type": "tool_result",
                     "tool_use_id": tu.id,

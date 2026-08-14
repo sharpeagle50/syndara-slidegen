@@ -11,7 +11,7 @@ license = { text = "MIT" }
 requires-python = ">=3.10"
 dependencies = [
     "anthropic>=0.40",
-    "claude-agent-sdk>=0.1",
+    "claude-agent-sdk>=0.2.111",  # builder pins model="claude-sonnet-5"; needs the bundled CLI 2.1.197+ (SDK >=0.2.111)
     "python-pptx>=0.6",
     "Pillow>=10",
     "matplotlib>=3.7",
@@ -24,6 +24,9 @@ dependencies = [
 diagrams = ["graphviz", "cairosvg"]
 # Rich text extraction for --context-file / --context-dir (PDF, Word, PowerPoint, Excel).
 context = ["pypdf>=4.0", "python-docx>=1.0", "python-pptx>=0.6.21", "openpyxl>=3.1"]
+# Concept-animation engine (deckgen.animation): agents that write + self-correct Manim scenes.
+# manim needs Python >= 3.11 and the Cairo/Pango toolchain; modal is only for remote rendering.
+animation = ["manim>=0.18", "manim-voiceover>=0.3", "modal"]
 
 [project.scripts]
 deckgen = "deckgen.cli:main"
@@ -34,7 +37,7 @@ Homepage = "https://github.com/sharpeagle50/syndara-slidegen"
 # The repository root *is* the `deckgen` package (agents/ and tools/ are its
 # subpackages), so map the package name onto the root directory.
 [tool.setuptools]
-packages = ["deckgen", "deckgen.agents", "deckgen.tools"]
+packages = ["deckgen", "deckgen.agents", "deckgen.animation", "deckgen.tools"]
 
 [tool.setuptools.package-dir]
 deckgen = "."

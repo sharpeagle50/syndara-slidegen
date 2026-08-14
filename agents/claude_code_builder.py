@@ -34,6 +34,67 @@ if _directive_path.exists():
 
 MAX_TURNS = 90
 
+# The builder runs an agentic PptxGenJS tool loop (generate code, render, self-correct). Pin it to
+# Opus 5 — Anthropic's flagship agentic-coding model, same $5/$25 price as Opus 4.8 and same-tier-
+# or-better, so it should drive this loop at least as reliably as 4.8 did. The CLI accepts the full
+# ID (verified: claude-agent-sdk 0.2.127 / CLI 2.1.219 resolves claude-opus-5 → subtype=success).
+#
+# Why NOT a lower tier: Sonnet 5 FAILED here — on this loop it thrashed (no-op "flush" calls, sleeps,
+# throwing errors to inspect the pptx object, and a DESTRUCTIVE pptx.slides.splice(0,...) reset) and
+# wrote corrupt non-ZIP files ("Builder produced corrupt file"). Stay on an Opus-tier model. The
+# builder-prompt guardrails + the corrupt-output retry in build() are the safety net if any model
+# misbehaves — worth watching the first real build after this change lands.
+#
+# Cost is captured from the SDK's exact total_cost_usd (see pricing.py), so the dashboard stays
+# accurate automatically.
+BUILDER_MODEL = "claude-opus-5"
+
+
+# QA-derived design rules shared by BOTH the fresh-build and targeted-edit prompts. Each block
+# exists because Visual QA kept re-flagging the defect class; keeping them here (not in one
+# prompt only) is what stops first builds from making mistakes that a paid QA rebuild pass then
+# has to fix. Any future QA-derived rule goes HERE, never into just one of the two prompts.
+# (Plain text, no braces — this passes through the templates' .format() call.)
+ANTI_DEFECT_DESIGN_RULES = """
+BOXES / OUTLINED CARDS — USE SPARINGLY (avoid the "everything in a rectangle" look):
+- A visible outlined box is a deliberate EMPHASIS device, not a default wrapper. Do NOT draw a
+  bordered rectangle around every bullet, heading, or text block. Plain text on the background,
+  separated by whitespace, reads cleaner and more modern — reach for an outline only to set ONE
+  element apart (e.g. a single hero callout), at most one or two boxed elements per slide.
+- NEVER nest a box in a box (this is the most common artifact): if an element already sits on a
+  filled/colored card, do NOT also put a bordered rectangle inside or around it. One frame max.
+- Bullet lists, titles, and the source/citation line should NOT be individually boxed.
+- Prefer a soft FILL (or nothing) over a visible BORDER; if content is already grouped by position,
+  it does not also need an outline.
+
+HORIZONTAL RULES / DIVIDERS — keep them clear of the text:
+- If you draw a horizontal rule or divider under a title, give it clear vertical clearance BELOW the
+  title's lowest line — it must never cut through, touch, or overlap the title text. Titles wrap to
+  two lines often; position the rule below the WRAPPED height, not the single-line height.
+- Leave a margin between the rule and whatever follows it too (a table header row, the top node of a
+  diagram, the first bullet) so the rule doesn't collide with the next element.
+- On the CONTENT master (which already has a left accent bar), a title rule should START at the right
+  edge of that accent bar and align to it — never run the rule through, across, or past the vertical
+  bar.
+
+TITLES — clean text, no template residue:
+- A title is plain prose: never start it with stray punctuation (", Linear models" / "; Recap") and
+  never leave raw markdown markers (**, ##, backticks) in any visible slide text.
+
+MATH ON SLIDES — Unicode inline, make_equation for display; NEVER raw TeX as text:
+- TeX/LaTeX markup must NEVER appear as literal slide text: no $...$, no \\frac, no ^{{...}} or
+  _{{...}} braces, anywhere a learner can see (titles, bullets, labels, chart legends).
+- INLINE math inside a sentence or title uses real Unicode characters: Greek letters directly
+  (λ, ω, ζ, π), operators (× ÷ ≤ ≥ ≈ ≠ → ∞ ∑ ∫ √ ∂), and Unicode superscripts for simple
+  powers (x², e⁻ᵏᵗ, 10⁻³). If an inline expression is too complex for that, simplify the
+  sentence or move the expression into a display equation.
+- DISPLAY equations (anything with stacked fractions, integrals with limits, multi-term
+  derivations) are IMAGES: call make_equation (e.g. latex='\\frac{{dy}}{{dt}} = -ky') with the
+  slide's text color, inspect the returned PNG, and place it sized by the returned aspect
+  ratio. In matplotlib chart labels/legends, wrap math in $...$ so mathtext typesets it —
+  a legend showing literal e^{{-x}} braces is a defect.
+"""
+
 
 SYSTEM_PROMPT_PPTXGEN = """You are the Syndara slide architect. You build a PowerPoint
 presentation for a training course module. You have access to Read, Write, Bash
@@ -98,11 +159,18 @@ YOUR JOB, in order:
    JavaScript code. Each call adds slides to the in-memory presentation.
    The file is saved automatically when the build finishes. Do NOT call
    pptx.writeFile() — it is handled for you.
-3. VISUALS ARE MANDATORY. The plan's **Visual elements** section specifies
+3. THE PLAN OWNS THE CONTENT; YOU OWN THE LAYOUT. What goes on each slide —
+   its text, whether it has a visual, and exactly what that visual shows — is
+   already decided in the plan. Render it faithfully; do NOT add, drop, swap, or
+   upgrade content. Your judgment is for LAYOUT only: spacing, positioning,
+   sizing, alignment, and the PptxGenJS/tool mechanics to realize what's specified.
+   VISUALS ARE PLAN-DRIVEN. The plan's **Visual elements** section specifies
    exactly what visual each slide needs (type + detailed description). You
    MUST generate every visual the plan calls for — a slide with
-   Visual type != 'none' that ships as text-only bullets is a FAILURE.
-   Build the visual FIRST, then add the minimal on-slide text around it.
+   Visual type != 'none' that ships as text-only bullets is a FAILURE. But the
+   converse is equally binding: a slide with **Type:** none is TEXT-ONLY — never
+   add an icon, image, chart, or decorative shape the plan didn't ask for.
+   Build the specified visual FIRST, then add the minimal on-slide text around it.
    Pick the right tool for the job:
      - **Linear process flows and step sequences**: build with MANUAL
        PptxGenJS shapes (addShape + addText). Native vector objects are
@@ -394,16 +462,15 @@ ICON USAGE:
 Use make_icon to render professional vector icons (react-icons library).
 Insert at 0.5-0.8 in for inline, 1.0-1.5 in for hero. Great for
 icon+text rows, grid cell headers, stat callouts, and process steps.
-GET THE NAME RIGHT: call find_icon('concept') to look up REAL icon names
-(e.g. find_icon('handshake') → FaHandshake). Do NOT guess an icon_name from
-memory — a name that doesn't exist fails and costs a turn. Pick a name from
-find_icon's results and pass it, with its icon_pack, to make_icon. When a
-slide's tiles each need a distinct icon, look each one up — never fall back
-to one repeated icon, plain numbered circles, or single-LETTER initials
-(a "T" or "F" in a circle is a placeholder, not an icon) when real icons are
-a lookup away. If find_icon returns nothing that fits a concept, render the
-closest real icon — or a simple geometric mark via make_icon — but NEVER a
-lettered or numbered circle standing in for the planned icon.
+GET THE NAME RIGHT, FAST: call find_icon with ONE plain concept noun —
+'gear', 'lock', 'people', 'sun' — NOT a descriptive phrase ('gear flow loop
+cycle' matches nothing and just burns turns). Pick a name from its results and
+pass it, with its icon_pack, to make_icon. Do NOT guess icon_names from memory.
+Keep it TIGHT: at most two find_icon tries per icon — if the second still finds
+nothing that fits, render a simple geometric mark via make_icon (or drop the
+icon) and move on; never keep re-searching or guessing names across packs. When a
+slide's tiles each need a distinct icon, look each up once — never a repeated
+icon, numbered circle, or single-LETTER initial standing in for a real icon.
 NEVER paste a Unicode symbol or icon-font glyph as an icon in slide text —
 not emoji (🔒 🔍 💡 ⚡), and not dingbat/symbol-font characters either. The
 PPTX-to-PNG renderer does not have those glyph fonts, so they come out as
@@ -413,35 +480,8 @@ CONTRAST: give every icon a color that clearly stands out against whatever
 sits behind it. Never render an icon in a near-background color (e.g. a
 white or very-light icon on a light tile) — it becomes invisible. Use the
 deck accent color on light fills, and a light color only on dark fills.
-
-PROGRESSIVE BUILDS (executing the plan's animation script — you do NOT choreograph):
-Some plan slides have Speaker notes written as a build SCRIPT: they start with [REVEAL] and
-contain inline markers like [[1 | show: the three stage cards]]. The PLAN owns all animation
-decisions. Your job is mechanical:
-1. Author the slide ONCE at its complete, final layout — every element the script ever shows,
-   all in their final positions (transients and both halves of a replacement included; on this
-   authored slide they all render at once, and that is expected). Elements never move or restyle
-   between beats; beats only show or hide elements (fade). Never reposition content for a
-   partial state. When the script says a replacement sits "in place" of what it replaces,
-   position it exactly there — the overlap is intentional staging.
-2. Copy the script into slide.addNotes() VERBATIM — header, markers, descriptions, all of it.
-3. Tag each animated element's objectName with its visibility window over the beat numbers:
-     objectName:'reveal:2'       appears at beat 2, stays to the end
-     objectName:'reveal:2-2'     visible ONLY during beat 2 (a transient)
-     objectName:'reveal:1-1,3'   in at beat 1, out at 2, back from 3 on (re-entry)
-   Read the windows off the script's descriptions: "[[2 | show: tip; hide: green note]]" means
-   the tip's window starts at 2 and the green note's window ends at 1 (closed: '1-1' — unless a
-   later marker shows it again, then '1-1,<that beat>'). Untagged elements are the base, visible
-   throughout. Several elements sharing a window = they animate together.
-4. Descriptions name elements loosely ("the ledger image") — map them to the shapes you created.
-   If the plan's script is malformed (markers not 1,2,3,…, a description referencing nothing you
-   can identify, an empty segment), build the slide STATIC with clean notes instead — a static
-   slide is always acceptable; a broken build is not. Do not invent, add, drop, or reorder beats.
-A slide whose plan notes have no [REVEAL] is a normal static slide — never add a build yourself.
-(Downstream, each marker becomes one extra physical slide with the not-yet-shown elements hidden;
-the markers never appear in the downloaded deck's notes, so copy them without worry.)
-
-TEXT ROTATION:
+""" + ANTI_DEFECT_DESIGN_RULES + """
+{progressive_builds_section}TEXT ROTATION:
 PptxGenJS supports `rotate` (degrees, clockwise) on any element:
   sl.addText('Label', {{ x: 1, y: 2, w: 3, h: 0.6, rotate: 90,
       fontSize: 14, color: s.text, fontFace: s.body_font }});
@@ -503,17 +543,23 @@ If you build a slide as text-only bullets when the plan says it needs a
 visual, the entire build will be rejected. This wastes the creator's time
 and yours. Generate the visual.
 
-SPECIAL CASE — **Type:** animation: this slide's visual is a Manim ANIMATION that is
-rendered separately and overlaid on the WHOLE slide AFTER you build it. Do NOT try to
-draw or approximate the animation, and do NOT call any diagram tool for it. Build a
-clean, uncluttered TITLE / POSTER slide — the slide title plus at most a one-line
-takeaway, with lots of open space (the animation will cover the slide when it plays).
-An animation slide is EXEMPT from the "must have a visual" rule and will NOT be
-rejected for having no diagram.
+SPECIAL CASE — **Type:** animation: this slide's visual is a Manim ANIMATION rendered
+separately and laid FULL-BLEED over the slide, covering it entirely. The player shows the
+animation's own background before it plays, so this built slide is almost never seen — it
+is ONLY a rare fallback (a failed render) and the static frame in the downloaded PPTX.
+Build it BARE: use the TITLE_DARK master (its dark background best matches the animation)
+and place ONLY the slide title on it. HARD RULES — no charts, no diagrams, no tables, no
+bullets, no icons, no panels, no stats, no one-line takeaway; do NOT call make_chart /
+make_d2_diagram / make_mermaid_diagram / any diagram tool for it, and do NOT approximate
+the animation. Title on an empty dark background, full stop — anything more is wasted work
+that just gets covered. It is EXEMPT from the "must have a visual" rule and must NOT be
+flagged for having no diagram.
 
 HARD LIMITS:
-- Max {max_turns} total tool calls — you have plenty of budget, so spend
-  turns on making visuals look great rather than rushing text-only slides.
+- Max {max_turns} total tool calls — a CEILING, not a target. Use only what the
+  deck needs; a simple text deck should take just a few calls per slide. Do NOT
+  pad with throwaway "test" slides, repeated re-renders of the same slide, or
+  repeated icon lookups. Spend extra turns only where a real visual needs polish.
 - Every slide with Visual type != 'none' MUST have a visual — either manual
   PptxGenJS shapes or a generated diagram/chart image. Text-only bullet
   slides when a visual was planned = failure.
@@ -527,6 +573,41 @@ DESIGN DIRECTIVE — follow these visual rules strictly:
 {design_directive}
 """
 
+
+# Teaching for executing the plan's reveal scripts. Injected into SYSTEM_PROMPT_PPTXGEN via the
+# {progressive_builds_section} placeholder ONLY when the course has progressive builds enabled —
+# a builds-off course gets a builder prompt in which the reveal-tag convention simply doesn't
+# exist, so the model can't emit it (the plan upstream is equally build-free; and web_runner's
+# explosion-time backstop strips anything that somehow slips through).
+PROGRESSIVE_BUILDS_SECTION = """PROGRESSIVE BUILDS (executing the plan's reveal script — you do NOT choreograph):
+A progressive build is a click-to-reveal on an ordinary slide (elements fade in as narrated) —
+NOT a Manim Type: animation (that is the separate full-bleed video case below). Some plan slides
+have Speaker notes written as a build SCRIPT: they start with [REVEAL] and contain inline markers
+like [[1 | show: the three stage cards]]. The PLAN owns all build decisions. Your job is mechanical:
+1. Author the slide ONCE at its complete, final layout — every element the script ever shows,
+   all in their final positions (transients and both halves of a replacement included; on this
+   authored slide they all render at once, and that is expected). Elements never move or restyle
+   between beats; beats only show or hide elements (fade). Never reposition content for a
+   partial state. When the script says a replacement sits "in place" of what it replaces,
+   position it exactly there — the overlap is intentional staging.
+2. Copy the script into slide.addNotes() VERBATIM — header, markers, descriptions, all of it.
+3. Tag each animated element's objectName with its visibility window over the beat numbers:
+     objectName:'reveal:2'       appears at beat 2, stays to the end
+     objectName:'reveal:2-2'     visible ONLY during beat 2 (a transient)
+     objectName:'reveal:1-1,3'   in at beat 1, out at 2, back from 3 on (re-entry)
+   Read the windows off the script's descriptions: "[[2 | show: tip; hide: green note]]" means
+   the tip's window starts at 2 and the green note's window ends at 1 (closed: '1-1' — unless a
+   later marker shows it again, then '1-1,<that beat>'). Untagged elements are the base, visible
+   throughout. Several elements sharing a window = they animate together.
+4. Descriptions name elements loosely ("the ledger image") — map them to the shapes you created.
+   If the plan's script is malformed (markers not 1,2,3,…, a description referencing nothing you
+   can identify, an empty segment), build the slide STATIC with clean notes instead — a static
+   slide is always acceptable; a broken build is not. Do not invent, add, drop, or reorder beats.
+A slide whose plan notes have no [REVEAL] is a normal static slide — never add a build yourself.
+(Downstream, each marker becomes one extra physical slide with the not-yet-shown elements hidden;
+the markers never appear in the downloaded deck's notes, so copy them without worry.)
+
+"""
 
 SYSTEM_PROMPT_PPTX = """You are the Syndara slide architect. You edit an existing
 PowerPoint presentation for a training course module. You have access to Read,
@@ -604,28 +685,7 @@ TEXT IN SHAPES — CRITICAL:
         para.alignment = PP_ALIGN.CENTER
 - If text doesn't fit, make the shape bigger — never let it auto-shrink.
 - Minimum font size: 10pt. Never go below this.
-
-BOXES / OUTLINED CARDS — USE SPARINGLY (avoid the "everything in a rectangle" look):
-- A visible outlined box is a deliberate EMPHASIS device, not a default wrapper. Do NOT draw a
-  bordered rectangle around every bullet, heading, or text block. Plain text on the background,
-  separated by whitespace, reads cleaner and more modern — reach for an outline only to set ONE
-  element apart (e.g. a single hero callout), at most one or two boxed elements per slide.
-- NEVER nest a box in a box (this is the most common artifact): if an element already sits on a
-  filled/colored card, do NOT also put a bordered rectangle inside or around it. One frame max.
-- Bullet lists, titles, and the source/citation line should NOT be individually boxed.
-- Prefer a soft FILL (or nothing) over a visible BORDER; if content is already grouped by position,
-  it does not also need an outline.
-
-HORIZONTAL RULES / DIVIDERS — keep them clear of the text:
-- If you draw a horizontal rule or divider under a title, give it clear vertical clearance BELOW the
-  title's lowest line — it must never cut through, touch, or overlap the title text. Titles wrap to
-  two lines often; position the rule below the WRAPPED height, not the single-line height.
-- Leave a margin between the rule and whatever follows it too (a table header row, the top node of a
-  diagram, the first bullet) so the rule doesn't collide with the next element.
-- On the CONTENT master (which already has a left accent bar), a title rule should START at the right
-  edge of that accent bar and align to it — never run the rule through, across, or past the vertical
-  bar.
-
+""" + ANTI_DEFECT_DESIGN_RULES + """
 HARD LIMITS:
 - Max {max_turns} total tool calls.
 - Only modify slides you are told to modify. Follow structural rules in
@@ -683,7 +743,10 @@ async def build_slides_with_claude_code(
         # ~40-slide module hit the cap mid-build and was dropped entirely. Budget for the
         # deck to FINISH; the builder stops early when done, so extra headroom costs nothing
         # on normal modules and only spends more on the genuinely large ones.
-        max_turns = max(max_turns, int(target_slides * 3.5) + 30)
+        # Scale to the deck: don't floor tiny decks at the big default (a 3-slide
+        # deck at 90 turns invites over-exploration — throwaway test slides, repeat
+        # renders, icon-hunting). ~3.5 calls/slide + fixed setup, min 30.
+        max_turns = max(30, int(target_slides * 3.5) + 20)
     outline_path = str(output_dir / "outline.json")
     images_dir = output_dir / "images"
     images_dir.mkdir(exist_ok=True)
@@ -694,14 +757,30 @@ async def build_slides_with_claude_code(
     # it — only edit the flagged slides. Saves a full rebuild when most of
     # the deck is already clean.
     rf_slides = (reviewer_feedback or {}).get("slides") or []
+    # Any per-slide status that asks for a change is a targeted edit. Critically this
+    # includes "needs_diagram"/"needs_image": if only those are present, treating them
+    # as un-actionable made is_targeted_edit False, which DELETED the deck and forced a
+    # full rebuild over an "add a diagram to slide 7" note. They edit slides too.
+    _ACTIONABLE_SLIDE_STATUSES = {"revise", "needs_diagram", "needs_image"}
     flagged = [
         s for s in rf_slides
         if isinstance(s, dict)
-           and s.get("status") == "revise"
+           and s.get("status") in _ACTIONABLE_SLIDE_STATUSES
            and "slide_index" in s
     ]
     pptx_exists = Path(pptx_path).exists()
     is_targeted_edit = bool(flagged) and pptx_exists
+
+    # A targeted edit's budget scales with the FLAGGED slides, not the whole deck: a
+    # one-slide fix on a 40-slide module was inheriting ~160 tool calls, which the prompt
+    # itself warns "invites over-exploration". ~6 calls per flagged slide (read, edit,
+    # chart, render, verify, margin) with a floor for setup/self-checks.
+    if is_targeted_edit:
+        # Retuned from max(12, n*6) after job 211: a QA fix session hit the 12-turn ceiling
+        # mid-edit (read + chart regen + render + verify per slide) and errored the whole
+        # pass — wasting the rebuild it was meant to be cheaper than. 24 + 8/slide still
+        # sits far below the ~160-turn full-deck budget it exists to avoid.
+        max_turns = min(max_turns, max(24, len(flagged) * 8))
 
     if not is_targeted_edit and pptx_exists:
         # Full rebuild (creator revision or no structured reviewer data) —
@@ -907,6 +986,12 @@ A slide that the plan says needs a visual but you render as text-only
 bullets is WRONG. You MUST generate the visual. This is non-negotiable.
 {keepout_block}"""
         web_images = outline.get("web_images", {})
+        # The key is dual-purpose: a BOOL enabled-flag on freshly-built outlines (read by the
+        # exercise/worksheet image lookup) that the download step later replaces with the dict of
+        # downloaded images. When a plan has no image slides the download step returns early and
+        # the bool survives to here — iterating it crashed the whole module (204 m4).
+        if not isinstance(web_images, dict):
+            web_images = {}
         if web_images:
             img_lines = ["\nWEB IMAGES (pre-downloaded from the web — use these local paths):"]
             for heading, info in web_images.items():
@@ -971,7 +1056,14 @@ bullets is WRONG. You MUST generate the visual. This is non-negotiable.
         "`c(hex)` (strips #), `PptxGenJS`. Pre-defined masters: 'CONTENT' "
         "(bg + left accent bar), 'TITLE_DARK' (dark bg), 'BLANK'. "
         "Use pptx.addSlide({{ masterName: 'CONTENT' }}). Do NOT reuse "
-        "options objects — PptxGenJS mutates them. Do not call writeFile().",
+        "options objects — PptxGenJS mutates them. Do not call writeFile(). "
+        "STATE PERSISTS across calls: slides you added in earlier calls are still on the deck — the "
+        "response tells you the current slide count. Build FORWARD, adding each slide once. NEVER "
+        "reset or mutate the slide array to 'start over' (no pptx.slides.splice / pop / length=0 / "
+        "reassignment) — that corrupts PptxGenJS's internal state and produces an unopenable file "
+        "even though the save looks successful. If a slide came out wrong, fix THAT slide; do not "
+        "reset the deck. Do NOT run no-op 'flush'/'verify'/'check' code, do NOT throw errors to "
+        "inspect `pptx`, and do NOT sleep — none of that is needed and it just wastes turns.",
         {"code": str},
     )
     async def run_pptxgen_code_tool(args):
@@ -1031,6 +1123,28 @@ bullets is WRONG. You MUST generate the visual. This is non-negotiable.
     async def make_chart_tool(args):
         r = render_tool.render_matplotlib_chart(args["code"], args["out_path"])
         return _diagram_result(r, "Chart")
+
+    @tool(
+        "make_equation",
+        "Typeset a math expression to a tightly-cropped TRANSPARENT PNG (matplotlib mathtext: "
+        "fractions, integrals, sums, roots, Greek, sub/superscripts, operators — no \\begin "
+        "environments). Use for any DISPLAY equation; NEVER write TeX markup as slide text. "
+        "latex: the expression WITHOUT surrounding $ (e.g. '\\frac{dy}{dt} = -ky'). color: hex "
+        "text color WITH # — MUST match the destination slide's text color (light color on dark "
+        "masters, same contrast rule as icons). serif: true on serif-styled decks (Georgia/"
+        "Garamond/Palatino body fonts) for Times-like math; false/omit on sans decks. fontsize: "
+        "pt at render (44 default; the placed image's size on the slide is what matters — use "
+        "the returned aspect to size without distortion). Returns the PNG for inspection before "
+        "inserting.",
+        {"latex": str, "out_path": str, "color": str, "fontsize": int, "serif": bool},
+    )
+    async def make_equation_tool(args):
+        r = render_tool.render_equation(
+            args["latex"], args["out_path"],
+            color=args.get("color") or "#1A1D2E",
+            fontsize=int(args.get("fontsize") or 44),
+            serif=bool(args.get("serif")))
+        return _diagram_result(r, "Equation")
 
     @tool(
         "make_flowchart",
@@ -1196,6 +1310,7 @@ bullets is WRONG. You MUST generate the visual. This is non-negotiable.
         mcp_tools = [
             run_pptxgen_code_tool,
             make_chart_tool,
+            make_equation_tool,
             make_flowchart_tool,
             make_d2_tool,
             make_mermaid_tool,
@@ -1208,6 +1323,7 @@ bullets is WRONG. You MUST generate the visual. This is non-negotiable.
             "Read", "Write",
             "mcp__pptx__run_pptxgen_code",
             "mcp__pptx__make_chart",
+            "mcp__pptx__make_equation",
             "mcp__pptx__make_flowchart",
             "mcp__pptx__make_d2_diagram",
             "mcp__pptx__make_mermaid_diagram",
@@ -1221,6 +1337,7 @@ bullets is WRONG. You MUST generate the visual. This is non-negotiable.
         mcp_tools = [
             run_pptx_code_tool,
             make_chart_tool,
+            make_equation_tool,
             make_flowchart_tool,
             make_d2_tool,
             make_mermaid_tool,
@@ -1231,6 +1348,7 @@ bullets is WRONG. You MUST generate the visual. This is non-negotiable.
             "Read", "Write",
             "mcp__pptx__run_pptx_code",
             "mcp__pptx__make_chart",
+            "mcp__pptx__make_equation",
             "mcp__pptx__make_flowchart",
             "mcp__pptx__make_d2_diagram",
             "mcp__pptx__make_mermaid_diagram",
@@ -1285,6 +1403,11 @@ bullets is WRONG. You MUST generate the visual. This is non-negotiable.
         design_directive=directive,
         max_words_per_slide=outline.get("max_words_per_slide") or 20,
         visual_motif=visual_motif_text,
+        # Builds-off courses get a prompt with the reveal-tag teaching removed entirely — the
+        # builder can't emit a convention it was never shown. (Extra kwargs are ignored by
+        # templates without the placeholder, e.g. the PPTX edit prompt.)
+        progressive_builds_section=(
+            PROGRESSIVE_BUILDS_SECTION if outline.get("progressive_builds", True) else ""),
     )
     from .base import STYLE_RULE
     sys_prompt += STYLE_RULE
@@ -1302,12 +1425,19 @@ bullets is WRONG. You MUST generate the visual. This is non-negotiable.
     except Exception:
         pass
 
+    import os as _os_env
     options = ClaudeAgentOptions(
+        model=BUILDER_MODEL,
         mcp_servers={"pptx": pptx_mcp},
         allowed_tools=allowed,
         permission_mode="acceptEdits",
         system_prompt=sys_prompt,
         max_turns=max_turns,
+        # The SDK's default 1MB per-JSON-message buffer killed a whole module build when one
+        # render_slide preview PNG base64'd past it (job 203 m5: "JSON message exceeded maximum
+        # buffer size"). 8MB is far above any legitimate tool result while still bounding memory;
+        # render_tool also downscales oversized previews so messages stay well under it.
+        max_buffer_size=int(_os_env.environ.get("SYNDARA_SDK_MAX_BUFFER", str(8 * 1024 * 1024))),
         **_opts_kwargs,
     )
 
@@ -1319,11 +1449,21 @@ bullets is WRONG. You MUST generate the visual. This is non-negotiable.
     _mode = "targeted-edit" if is_targeted_edit else "full-build"
     print(f"[{_label}] START mode={_mode} max_turns={max_turns}", flush=True)
 
+    # Wall-clock deadline: this loop previously had NO overall timeout, so a wedged SDK/CLI
+    # session hung the module forever while holding a concurrency slot. On expiry we break and
+    # fall through to the same salvage path as a non-success end.
+    _deadline_s = int(os.environ.get("SYNDARA_BUILDER_DEADLINE", "3600"))
+    _nonsuccess: Optional[str] = None
     try:
         final_result: Optional[str] = None
         _tool_names: dict = {}       # tool name -> count
         _action_counts: dict = {}    # "name(input-preview)" -> count, to spot repeated/spinning actions
         async for message in query(prompt=prompt, options=options):
+            if _time.time() - _t0 > _deadline_s:
+                _nonsuccess = "deadline_exceeded"
+                print(f"[{_label}] DEADLINE ({_deadline_s}s) exceeded — stopping the session and "
+                      f"salvaging the persisted deck", flush=True)
+                break
             if isinstance(message, AssistantMessage):
                 from claude_agent_sdk import ToolUseBlock
                 for block in message.content:
@@ -1376,9 +1516,14 @@ bullets is WRONG. You MUST generate the visual. This is non-negotiable.
                     flush=True,
                 )
                 if message.subtype != "success":
-                    raise RuntimeError(
-                        f"Claude Code builder ended non-success: {message.subtype}. {final_result[:400]}"
-                    )
+                    # Do NOT raise here: render_slide snapshots the deck to pptx_path on every
+                    # self-check, so a max-turns/aborted session usually leaves a complete or
+                    # near-complete valid deck on disk. Raising threw that paid work away (two
+                    # prior incidents dropped whole 40-slide modules). Record it and let the
+                    # salvage check after the loop decide.
+                    _nonsuccess = message.subtype
+                    print(f"[{_label}] NON-SUCCESS end ({message.subtype}) — will try to salvage "
+                          f"the persisted deck", flush=True)
     except Exception as e:
         traceback.print_exc()
         # Try to save whatever we have before raising
@@ -1415,6 +1560,29 @@ bullets is WRONG. You MUST generate the visual. This is non-negotiable.
             f"worker died before any deck was persisted (no render snapshot taken). "
             f"Final message: {(final_result or '')[:400]}"
         )
+
+    if _nonsuccess:
+        # Salvage decision for a session that ended non-success (error_max_turns, CLI abort,
+        # deadline): accept the persisted deck when it's a valid ZIP holding a plausible share
+        # of the planned slides — Visual QA and creator review catch the gaps. Only raise when
+        # nothing usable exists; the old behavior threw away complete 40-slide decks.
+        import re as _re
+        import zipfile as _zf
+        _ok = False
+        _n = 0
+        try:
+            with _zf.ZipFile(pptx_path) as _z:
+                _n = sum(1 for nm in _z.namelist() if _re.match(r"ppt/slides/slide\d+\.xml$", nm))
+            _need = max(3, int(target_slides * 0.6)) if target_slides else 3
+            _ok = _n >= _need
+            print(f"[{_label}] SALVAGE CHECK after {_nonsuccess}: {_n} slides on disk, "
+                  f"need >= {_need} -> {'ACCEPT (degraded)' if _ok else 'reject'}", flush=True)
+        except Exception as _se:
+            print(f"[{_label}] salvage check failed: {_se}", flush=True)
+        if not _ok:
+            raise RuntimeError(
+                f"Claude Code builder ended non-success: {_nonsuccess}, and no salvageable "
+                f"deck was persisted ({_n} slides). {(final_result or '')[:400]}")
 
     # Strip OPC-violating directory entries that PptxGenJS/JSZip leaves in the
     # chart data workbooks — otherwise PowerPoint shows a 'repair' dialog.
@@ -1459,12 +1627,30 @@ def build(
     watermark_info: Optional[dict] = None,
 ) -> str:
     """Synchronous-looking entry point. Spins its own asyncio loop so this
-    is safe to call from asyncio.to_thread()."""
+    is safe to call from asyncio.to_thread().
+
+    Corrupt-output safety net: the agentic loop can (rarely) leave PptxGenJS in a bad state so the
+    saved file isn't a valid .pptx/ZIP while save() still reports success (e.g. a destructive slide
+    reset). That's a silent way to kill a paid build, so validate the output here and rebuild ONCE
+    from a fresh session before giving up. Only fires on an already-broken build, so no cost in the
+    normal case. Centralized here so every caller (single-deck, course, revamp) is protected."""
     import asyncio
-    return asyncio.run(
-        build_slides_with_claude_code(outline, output_dir, style, reviewer_feedback,
-                                      watermark_info=watermark_info)
-    )
+    import zipfile as _zip
+    _label = outline.get("module_id", "?")
+    path = ""
+    for attempt in range(2):   # original + one retry
+        path = asyncio.run(
+            build_slides_with_claude_code(outline, output_dir, style, reviewer_feedback,
+                                          watermark_info=watermark_info)
+        )
+        if path and Path(path).exists() and _zip.is_zipfile(path):
+            return path
+        if attempt == 0:
+            print(f"[Builder.{_label}] output is not a valid pptx (corrupt/non-ZIP) — "
+                  f"rebuilding ONCE from a fresh session", flush=True)
+    # Still bad after the retry — return the path and let the caller's validation raise a clear error.
+    print(f"[Builder.{_label}] output still invalid after retry — surfacing to caller", flush=True)
+    return path
 
 
 class ClaudeCodeSlideBuilder:

@@ -5,8 +5,10 @@ import asyncio
 import io
 import logging
 import re
+import threading
+import time
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlsplit, urlunsplit
 
 from .. import keyring
 
@@ -17,7 +19,125 @@ MIN_DIM = 400
 WARN_DIM = 600
 MAX_DIM = 4000
 MAX_CONCURRENT = 5
-USER_AGENT = "Syndara/1.0 (educational content platform)"
+# Wikimedia's robot policy (w.wiki/4wJS) requires bots to identify themselves with contact
+# info (URL or email) in the UA; anonymous product strings get bucketed as non-compliant
+# and 429'd almost immediately. The contact address is the public one from our ToS.
+USER_AGENT = "SyndaraBot/1.0 (https://syndara.org; ava@syndara.org) httpx"
+
+
+# ── Per-domain politeness: shared throttle + 429 circuit breaker ─────────────────────────
+# Every fetch path (direct plan URLs, page-extract candidates, candidate-page HTML) goes
+# through the same per-domain gate. Without it, several planner agents running in parallel
+# hammer one host (usually upload.wikimedia.org) from a single egress IP, get rate-limited,
+# and then every subsequent candidate burns retries + backoff on a host that has already
+# said no — a 429 storm that turns image sourcing into the build's long pole.
+_DOMAIN_MIN_INTERVAL = 0.5   # seconds between requests to any one domain, process-wide
+_429_TRIP_COUNT = 3          # consecutive 429/503s from a domain before backing off entirely
+_429_COOLDOWN_S = 120.0
+
+# A threading.Lock, NOT asyncio.Lock: callers run in many short-lived event loops across
+# several planner threads (each find_image tool call is its own asyncio.run), and an
+# asyncio.Lock binds to the first loop that touches it, raising "bound to a different event
+# loop" everywhere else. This lock only guards synchronous dict math — it is never held
+# across an await, so it can't stall an event loop.
+_domain_lock = threading.Lock()
+_domain_next_slot: dict[str, float] = {}
+_domain_429_streak: dict[str, int] = {}
+_domain_cooldown_until: dict[str, float] = {}
+
+
+def _domain_of(url: str) -> str:
+    try:
+        return urlparse(url).netloc.lower()
+    except Exception:
+        return ""
+
+
+def _domain_cooling(url: str) -> float:
+    """Seconds of 429-cooldown remaining for this URL's domain (0.0 = OK to fetch)."""
+    return max(0.0, _domain_cooldown_until.get(_domain_of(url), 0.0) - time.monotonic())
+
+
+async def _throttle_domain(url: str) -> None:
+    dom = _domain_of(url)
+    if not dom:
+        return
+    with _domain_lock:
+        # Reserve this domain's next slot while holding the lock, then sleep WITHOUT the
+        # lock — otherwise one domain's throttle serializes every other domain's requests.
+        fire_at = max(time.monotonic(), _domain_next_slot.get(dom, 0.0) + _DOMAIN_MIN_INTERVAL)
+        _domain_next_slot[dom] = fire_at
+    wait = fire_at - time.monotonic()
+    if wait > 0:
+        await asyncio.sleep(wait)
+
+
+def _note_rate_limited(url: str) -> None:
+    dom = _domain_of(url)
+    if not dom:
+        return
+    with _domain_lock:
+        streak = _domain_429_streak.get(dom, 0) + 1
+        _domain_429_streak[dom] = streak
+        if streak >= _429_TRIP_COUNT:
+            _domain_cooldown_until[dom] = time.monotonic() + _429_COOLDOWN_S
+    if streak >= _429_TRIP_COUNT:
+        log.warning("domain %s tripped the 429 breaker (%d consecutive) — cooling down %.0fs",
+                    dom, streak, _429_COOLDOWN_S)
+
+
+def _note_responded(url: str) -> None:
+    """Any non-rate-limit response (even a 404) means the domain is talking to us again."""
+    with _domain_lock:
+        _domain_429_streak.pop(_domain_of(url), None)
+
+
+# ── Wikimedia URL normalization ──────────────────────────────────────────────────────────
+# upload.wikimedia.org only serves bots the pre-rendered standard thumbnail widths
+# (w.wiki/GHai); originals ("thumbnail_unscaled") and odd widths draw a 429 regardless of
+# how polite the UA is. Scraped URLs also carry utm_* / cache-buster query params that make
+# identical images look distinct to the dedupe. Normalizing fixes both.
+# Standard pre-rendered widths we target, floored at 500: a sub-MIN_DIM thumb is useless to
+# us, and the full-size original usually exists, so ask for a size that can actually pass
+# validation. (If the original is smaller than the requested width Wikimedia errors and the
+# candidate loop simply moves on — no worse than today, where the small fetch fails MIN_DIM.)
+_WIKIMEDIA_THUMB_BUCKETS = (500, 960)
+_WM_THUMB_RE = re.compile(
+    r"^(?P<base>/wikipedia/[^/]+/thumb/[^/]/[^/]{2}/[^/]+)/"
+    r"(?P<pre>(?:lossy(?:-page\d+)?-|lossless(?:-page\d+)?-|page\d+-)?)(?P<w>\d+)px-(?P<rest>.+)$")
+_WM_ORIG_RE = re.compile(
+    r"^(?P<proj>/wikipedia/[^/]+)/(?P<d1>[^/])/(?P<d2>[^/]{2})/(?P<fname>[^/]+)$")
+
+
+def _wm_snap_width(requested: int) -> int:
+    return next((b for b in _WIKIMEDIA_THUMB_BUCKETS if b >= requested), 960)
+
+
+def _normalize_wikimedia_url(u: str) -> str:
+    try:
+        sp = urlsplit(u)
+        if sp.netloc.lower() != "upload.wikimedia.org":
+            return u
+        path = sp.path
+        m = _WM_THUMB_RE.match(path)
+        if m:
+            w = _wm_snap_width(int(m.group("w")))
+            path = f"{m.group('base')}/{m.group('pre')}{w}px-{m.group('rest')}"
+        else:
+            m = _WM_ORIG_RE.match(path)
+            if m:
+                fname = m.group("fname")
+                thumbname = f"960px-{fname}"
+                if fname.lower().endswith(".svg"):
+                    thumbname += ".png"
+                elif fname.lower().endswith((".tif", ".tiff")):
+                    thumbname = f"lossy-page1-{thumbname}.jpg"
+                path = (f"{m.group('proj')}/thumb/{m.group('d1')}/{m.group('d2')}/"
+                        f"{fname}/{thumbname}")
+        # Query strings on upload.wikimedia.org are never load-bearing (utm_*, `_=` busters).
+        return urlunsplit((sp.scheme, sp.netloc, path, "", ""))
+    except Exception:
+        return u
 
 
 def _empty_result(path: str = "", error: str = "") -> dict:
@@ -34,13 +154,25 @@ def _process_image(raw_bytes: bytes, out_path: str) -> dict:
     img = Image.open(io.BytesIO(raw_bytes))
     img_format = (img.format or "").upper()
 
+    # Capture rights metadata (CMI) BEFORE the re-save drops it: if the original file names an
+    # author or copyright holder, keep the claim alongside the processed file instead of silently
+    # destroying it (removing copyright-management information is its own DMCA §1202 issue, apart
+    # from any infringement question). Persisted into the fetch result → plan → DB.
+    exif_artist = exif_copyright = ""
+    try:
+        _ex = img.getexif()
+        exif_artist = str(_ex.get(315) or "").strip()[:200]       # TIFF/EXIF tag: Artist
+        exif_copyright = str(_ex.get(33432) or "").strip()[:200]  # TIFF/EXIF tag: Copyright
+    except Exception:
+        pass
+
     if img_format in ("WEBP", "GIF"):
         img = img.convert("RGBA")
         img_format = "PNG"
 
-    # Metadata (EXIF/IPTC/XMP) is dropped naturally: the save() calls below never pass
-    # exif=/icc_profile=, so PIL writes pixels only. (The old frombytes() round-trip here
-    # silently rebuilt palette PNGs with an empty palette, corrupting their colors.)
+    # Pixel data only from here: the save() calls below never pass exif=/icc_profile=, so PIL
+    # writes pixels only. (The old frombytes() round-trip here silently rebuilt palette PNGs
+    # with an empty palette, corrupting their colors.)
 
     w, h = img.size
     shortest = min(w, h)
@@ -72,6 +204,7 @@ def _process_image(raw_bytes: bytes, out_path: str) -> dict:
         "width_px": w, "height_px": h,
         "aspect": round(w / max(h, 1), 3),
         "format": img_format, "file_size_bytes": file_size, "error": "",
+        "exif_artist": exif_artist, "exif_copyright": exif_copyright,
     }
 
 
@@ -83,30 +216,37 @@ async def fetch_web_image(url: str, out_path: str, timeout: float = 20.0, refere
     # Accept header nudges servers that content-negotiate to send the image, not an HTML page.
     base_headers = {"User-Agent": USER_AGENT, "Accept": "image/avif,image/webp,image/png,image/*,*/*"}
     headers = dict(base_headers)
-    referer_tried = False
+    # NOTE: `referer` is accepted for signature compatibility but deliberately NOT used. A 401/403
+    # is a site's hotlink protection saying no — retrying with a spoofed Referer to defeat it
+    # (removed 2026-08-03) would turn "we fetched a public image" into circumventing the owner's
+    # explicit block, which is indefensible if a rights dispute ever reaches a courtroom. We treat
+    # 401/403 as a plain failure and let the pipeline pick a different image.
+    _ = referer
+    url = _normalize_wikimedia_url(url)
     for attempt in range(3):
+        cooling = _domain_cooling(url)
+        if cooling > 0:
+            return _empty_result(
+                error=f"{_domain_of(url)} is rate-limiting us (429); cooling down {cooling:.0f}s more")
+        await _throttle_domain(url)
         try:
             async with httpx.AsyncClient(
                 timeout=timeout, follow_redirects=True, max_redirects=5, headers=headers,
             ) as client:
                 resp = await client.get(url)
 
-            if resp.status_code in (429, 503) and attempt < 2:
-                ra = resp.headers.get("retry-after", "")
-                try:
-                    delay = float(ra)
-                except ValueError:
-                    delay = 1.5 * (attempt + 1)
-                await asyncio.sleep(min(delay, 6.0))
-                continue
-
-            # Hotlink protection: many CDNs 401/403 a request that carries no Referer. Retry ONCE
-            # with the source page as Referer. The first attempt is byte-for-byte unchanged, so this
-            # can only recover a fetch that already failed — it never regresses a working one.
-            if resp.status_code in (401, 403) and referer and not referer_tried and attempt < 2:
-                referer_tried = True
-                headers = {**base_headers, "Referer": referer}
-                continue
+            if resp.status_code in (429, 503):
+                _note_rate_limited(url)
+                if attempt < 2:
+                    ra = resp.headers.get("retry-after", "")
+                    try:
+                        delay = float(ra)
+                    except ValueError:
+                        delay = 1.5 * (attempt + 1)
+                    await asyncio.sleep(min(delay, 6.0))
+                    continue
+            else:
+                _note_responded(url)
 
             resp.raise_for_status()
 
@@ -249,7 +389,7 @@ def _extract_page_image_urls(html: str, base_url: str, limit: int = 8) -> list[s
         # HTML attribute values encode `&` as `&amp;`; decode before use or the query string
         # is malformed (e.g. `?url=...&amp;w=1920` 400s). Then unwrap image-optimizer proxies.
         u = _unwrap_optimizer_url(_unescape(u))
-        full = urljoin(base_url, u)
+        full = _normalize_wikimedia_url(urljoin(base_url, u))
         low = full.lower()
         if not full.startswith(("http://", "https://")):
             return
@@ -259,6 +399,12 @@ def _extract_page_image_urls(html: str, base_url: str, limit: int = 8) -> list[s
         path_low = urlsplit(full).path.lower()
         if (path_low.endswith((".svg", ".mp4", ".webm", ".mov", ".m4v", ".avi", ".mkv", ".ogv", ".mp3", ".pdf"))
                 or "sprite" in low or "/icon" in low or "logo" in low):
+            return
+        # Page chrome that survives the checks above: favicons, CC license badges, and other
+        # tiny insignia (all over Wikimedia/Commons pages). Each one is a doomed candidate —
+        # it would fail the MIN_DIM check after download — so drop it before spending a fetch.
+        if re.search(r"(?i)(favicon|wordmark|badge|cc[-_](?:by|sa|nc|nd|zero|some)|creative_commons"
+                     r"|copyright_icon|_icon\.)", path_low):
             return
         if full in seen:
             return
@@ -281,6 +427,10 @@ def _extract_page_image_urls(html: str, base_url: str, limit: int = 8) -> list[s
 
 async def _fetch_page_html(url: str, timeout: float = 15.0) -> str:
     import httpx
+    if _domain_cooling(url) > 0:
+        log.info("skipping page %s: domain cooling down after repeated 429s", url)
+        return ""
+    await _throttle_domain(url)
     try:
         async with httpx.AsyncClient(
             timeout=timeout, follow_redirects=True, max_redirects=5,
@@ -358,6 +508,11 @@ async def find_images_for_target(query: str, intent: str, out_path: str, *,
         for img_url in _extract_page_image_urls(html, page):
             if tried >= max_candidates:
                 return _empty_result(error=f"exhausted {max_candidates} candidates; last: {last_error}")
+            # A cooling domain is a known dead end — skip WITHOUT burning a candidate slot,
+            # so one rate-limited host doesn't starve candidates hosted elsewhere.
+            if _domain_cooling(img_url) > 0:
+                last_error = f"{_domain_of(img_url)} cooling down after repeated 429s"
+                continue
             tried += 1
             res = await fetch_web_image(img_url, out_path, referer=page)
             if not (res and res.get("success")):
@@ -464,24 +619,6 @@ async def download_plan_images(image_entries: list[dict], images_dir: str) -> di
     Path(images_dir).mkdir(parents=True, exist_ok=True)
     sem = asyncio.Semaphore(MAX_CONCURRENT)
 
-    domain_last_request: dict[str, float] = {}
-    domain_lock = asyncio.Lock()
-
-    async def _rate_limit(url: str):
-        domain = urlparse(url).netloc
-        if not domain:
-            return
-        import time
-        async with domain_lock:
-            # Reserve this domain's next slot while holding the lock, then sleep WITHOUT the
-            # lock — otherwise a 0.5s throttle on one domain serializes requests to every
-            # other domain too, defeating the MAX_CONCURRENT parallelism.
-            fire_at = max(time.monotonic(), domain_last_request.get(domain, 0.0) + 0.5)
-            domain_last_request[domain] = fire_at
-        wait = fire_at - time.monotonic()
-        if wait > 0:
-            await asyncio.sleep(wait)
-
     async def _download_one(idx: int, entry: dict) -> tuple[str, dict]:
         heading = entry.get("slide_heading", f"slide_{idx}")
         ext = ".png"
@@ -520,7 +657,6 @@ async def download_plan_images(image_entries: list[dict], images_dir: str) -> di
             # Attempt 1: a direct URL from the plan, then vision-verify it.
             image_url = entry.get("image_url", "")
             if (not result or not result.get("success")) and image_url:
-                await _rate_limit(image_url)
                 result = await fetch_web_image(image_url, out_path)
                 if result and result.get("success"):
                     v = await verify_image(intent, result["path"])
@@ -563,5 +699,16 @@ async def download_plan_images(image_entries: list[dict], images_dir: str) -> di
             }
 
     tasks = [_download_one(i, entry) for i, entry in enumerate(image_entries)]
-    results = await asyncio.gather(*tasks)
-    return dict(results)
+    # return_exceptions: an image is a best-effort enhancement, never a reason to fail the module.
+    # Every real failure mode already returns {"failed": True}; this only catches an UNEXPECTED
+    # exception (socket reset, Anthropic error in verify) so one bad image can't abort the build.
+    raw = await asyncio.gather(*tasks, return_exceptions=True)
+    out: dict = {}
+    for entry, r in zip(image_entries, raw):
+        if isinstance(r, Exception):
+            heading = entry.get("slide_heading", "")
+            if heading:
+                out[heading] = {"path": "", "failed": True, "error": str(r)[:200]}
+        else:
+            out[r[0]] = r[1]
+    return out

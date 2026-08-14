@@ -146,15 +146,24 @@ _COLOR_KEYS = {"bg", "surface", "accent", "accent2", "highlight", "border", "tex
 
 
 def get_palette(style: str) -> dict:
-    """Get palette dict (hex strings) by preset name or JSON custom palette."""
+    """Get palette dict (hex strings) by preset name or JSON custom palette.
+
+    A JSON custom palette is either a full color palette ({"bg", "accent", ...}) or a preset
+    reference with overrides ({"base": "professional", "title_font": "Georgia", ...}) — the latter
+    lets a creator keep a preset's curated colors while overriding its fonts (or anything else)."""
     if style in STYLE_PALETTES:
         return STYLE_PALETTES[style]
     try:
         custom = json.loads(style)
-        if isinstance(custom, dict) and "bg" in custom and "accent" in custom:
-            base = dict(STYLE_PALETTES["professional"])
-            base.update(custom)
-            return base
+        if isinstance(custom, dict):
+            if custom.get("base") in STYLE_PALETTES:
+                base = dict(STYLE_PALETTES[custom["base"]])
+                base.update({k: v for k, v in custom.items() if k != "base"})
+                return base
+            if "bg" in custom and "accent" in custom:
+                base = dict(STYLE_PALETTES["professional"])
+                base.update(custom)
+                return base
     except (json.JSONDecodeError, TypeError):
         pass
     return STYLE_PALETTES["professional"]

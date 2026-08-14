@@ -254,7 +254,9 @@ def clean_reveal_notes(pptx_path: str) -> int:
         if not slide.has_notes_slide:
             continue
         tf = slide.notes_slide.notes_text_frame
-        if tf.text and "[REVEAL]" in tf.text:
+        # Not gated on the [REVEAL] header: headerless "[[N | ...]]" markers (a model slip the
+        # strict script parser rejects) must not survive into the downloaded deck's notes either.
+        if tf.text and ("[REVEAL]" in tf.text or _REVEAL_MARKER_RE.search(tf.text)):
             tf.text = strip_reveal_markup(tf.text)
             n += 1
     if n:
@@ -705,6 +707,37 @@ def _strip_em_dashes_in_runs(data: bytes) -> tuple[bytes, bool]:
         return data, False
 
 
+_LEADING_PUNCT_RE = re.compile(r"^[,;:·]+\s+")
+
+
+def _strip_stray_leading_punct(data: bytes) -> tuple[bytes, bool]:
+    """Strip stray leading punctuation (", Linear IVP with a variable coefficient") from the
+    FIRST text run of each paragraph — the deterministic backstop for a template artifact the
+    model occasionally emits in titles. Visual QA classes it as critical placeholder_artifacts,
+    so without this backstop a one-character defect buys a full builder rebuild pass.
+    Paragraph-leading only: punctuation at the start of a LATER run in the same paragraph is
+    legitimate mid-sentence text (runs are fragments) and is never touched.
+    """
+    if not any(p in data for p in (b"<a:t>,", b"<a:t>;", b"<a:t>:", b"<a:t>\xc2\xb7")):
+        return data, False
+    try:
+        text = data.decode("utf-8", "replace")
+
+        def _fix_para(pm: "re.Match[str]") -> str:
+            return re.sub(
+                r"<a:t>(.*?)</a:t>",
+                lambda tm: "<a:t>" + _LEADING_PUNCT_RE.sub("", tm.group(1)) + "</a:t>",
+                pm.group(0), count=1, flags=re.S,
+            )
+
+        new = re.sub(r"<a:p>.*?</a:p>", _fix_para, text, flags=re.S)
+        nb = new.encode("utf-8")
+        return nb, nb != data
+    except Exception:
+        # Cosmetic only — must never disable the structural repairs around it.
+        return data, False
+
+
 def _sanitize_package_bytes(raw: bytes, _depth: int = 0) -> tuple[bytes, bool]:
     """Rewrite an OOXML package (zip) to remove two classes of defect that make
     PowerPoint flag the file as damaged, recursing into embedded OOXML parts.
@@ -742,6 +775,8 @@ def _sanitize_package_bytes(raw: bytes, _depth: int = 0) -> tuple[bytes, bool]:
                     changed = changed or xfrm_changed
                     data, dash_changed = _strip_em_dashes_in_runs(data)
                     changed = changed or dash_changed
+                    data, punct_changed = _strip_stray_leading_punct(data)
+                    changed = changed or punct_changed
                 if "charts/chart" in fname:
                     data, axis_changed = _fix_chart_value_axis_titles(data)
                     changed = changed or axis_changed
@@ -813,49 +848,66 @@ def extract_slide_pngs(pptx_path: str, output_dir: str) -> list[str]:
     pdf_dir = tempfile.mkdtemp(prefix="syndara_pdf_")
     pdf_path = None
     try:
-        for lo in lo_candidates:
-            try:
-                result = subprocess.run(
-                    [lo, "--headless", "--convert-to", "pdf", "--outdir", pdf_dir, pptx_path],
-                    capture_output=True, timeout=120,
-                )
-                if result.returncode == 0:
-                    pdfs = list(Path(pdf_dir).glob("*.pdf"))
-                    if pdfs:
-                        pdf_path = pdfs[0]
-                        print(f"[extract_slide_pngs] PDF created via {lo}")
-                        break
-                else:
-                    print(f"[extract_slide_pngs] {lo} failed (rc={result.returncode}): {result.stderr.decode()[:200]}")
-            except FileNotFoundError:
-                continue
-            except subprocess.TimeoutExpired:
-                print(f"[extract_slide_pngs] {lo} timed out after 120s")
+        # Placeholder-PNG policy: the matplotlib fallback exists for machines with NO conversion
+        # tooling (local dev). When the tooling IS present and fails, falling back used to count as
+        # SUCCESS all the way to publish — learners got "Preview unavailable" cards as their actual
+        # slides, with no error anywhere. Now: tooling absent → fallback; tooling present but
+        # failing → retry once, then RAISE so the module fails visibly and can be retried.
+        lo_present = bool(which_lo or nix_hits
+                          or any(Path(c).exists() for c in lo_candidates if c.startswith("/")))
+        from .render_tool import libreoffice_convert_pdf
+        _pdf = libreoffice_convert_pdf(pptx_path, lo_candidates, pdf_dir)
+        if not _pdf and lo_present:
+            print("[extract_slide_pngs] LibreOffice failed — retrying once", flush=True)
+            _pdf = libreoffice_convert_pdf(pptx_path, lo_candidates, pdf_dir)
+        if _pdf:
+            pdf_path = Path(_pdf)
+            print(f"[extract_slide_pngs] PDF created (isolated profile, scaled timeout)")
 
         if not pdf_path:
+            if lo_present:
+                raise RuntimeError(
+                    f"LibreOffice is installed but failed to convert {pptx_path} after a retry — "
+                    f"refusing to publish placeholder slide images")
             print("[extract_slide_pngs] LibreOffice not found — using matplotlib fallback")
             return _fallback_slide_pngs(pptx_path, str(output_dir))
 
         # Step 2: PDF → per-page PNGs via pdftoppm
         prefix = str(output_dir / "slide")
-        try:
-            result = subprocess.run(
-                ["pdftoppm", "-png", "-r", "150", str(pdf_path), prefix],
-                capture_output=True, timeout=120,
-            )
-            if result.returncode != 0:
-                print(f"[extract_slide_pngs] pdftoppm failed: {result.stderr.decode()[:300]}")
+        for _attempt in (1, 2):
+            try:
+                result = subprocess.run(
+                    # 200 DPI ≈ 2667px wide on a 13.33in slide — crisp on retina-class
+                    # displays where the old 150 read soft next to PowerPoint's vector
+                    # rendering (~1.8x the PNG bytes; R2 storage/bandwidth, acceptable).
+                    ["pdftoppm", "-png", "-r", "200", str(pdf_path), prefix],
+                    capture_output=True, timeout=180,
+                )
+                if result.returncode == 0:
+                    break
+                print(f"[extract_slide_pngs] pdftoppm failed (attempt {_attempt}): "
+                      f"{result.stderr.decode()[:300]}")
+                if _attempt == 2:
+                    raise RuntimeError(
+                        "pdftoppm failed twice on a valid PDF — refusing to publish placeholder "
+                        "slide images")
+            except FileNotFoundError:
+                print("[extract_slide_pngs] pdftoppm not installed — using matplotlib fallback")
                 return _fallback_slide_pngs(pptx_path, str(output_dir))
-        except (FileNotFoundError, subprocess.TimeoutExpired) as e:
-            print(f"[extract_slide_pngs] pdftoppm unavailable ({type(e).__name__}) — using matplotlib fallback")
-            return _fallback_slide_pngs(pptx_path, str(output_dir))
+            except subprocess.TimeoutExpired:
+                print(f"[extract_slide_pngs] pdftoppm timed out (attempt {_attempt})")
+                if _attempt == 2:
+                    raise RuntimeError(
+                        "pdftoppm timed out twice — refusing to publish placeholder slide images")
 
     finally:
         shutil.rmtree(pdf_dir, ignore_errors=True)
 
     pngs = sorted(output_dir.glob("slide-*.png"))
     if not pngs:
-        return _fallback_slide_pngs(pptx_path, str(output_dir))
+        raise RuntimeError(
+            f"Slide PNG conversion produced no images for {pptx_path} — refusing to publish "
+            f"placeholder slide images")
 
     return [str(p) for p in pngs]
 

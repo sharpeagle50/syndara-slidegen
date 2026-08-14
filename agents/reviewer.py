@@ -1,7 +1,7 @@
 """Reviewer Agent: critiques content, fact-checks with web search. NO write tools."""
 from __future__ import annotations
 import json
-from .base import BaseAgent, extract_json, text_from_response
+from .base import BaseAgent, MaxTokensError, extract_json, text_from_response
 
 REVIEWER_SYSTEM = """You are the Syndara Reviewer + Fact-Checker. You evaluate course
 content against the content standard AND aggressively fact-check every factual claim
@@ -151,24 +151,45 @@ CREATOR'S REQUEST:
 
 Check ONLY whether the revised slide(s) below correctly and adequately address the creator's request. Do NOT flag anything else — no new suggestions, no unrelated issues. Just verify the requested change was made.
 
-Use web_search to verify any factual claims introduced by the revision (tool names, commands, etc.). Facts that the revision draws from the authoritative plan below are already cited — do not flag or strip those.
-{plan_block}
+Use web_search to verify any factual claims introduced by the revision (tool names, commands, etc.). Facts that the revision draws from the authoritative plan (provided in the system context) are already cited — do not flag or strip those.
 REVISED SLIDES:
 {content_summary}
 
 Produce the JSON verdict only. No commentary outside the JSON."""
         else:
             user_msg = f"""Review cycle {cycle}. Evaluate these slides against the Practicality Mandate content standard.
-{plan_block}
 SLIDES TO REVIEW:
 {content_summary}
 
 Produce the JSON verdict only. No commentary outside the JSON."""
 
+        # The plan is identical across a deck's review cycles; put it in the cached
+        # system block (extra_system) instead of the per-cycle user message so cycle 2+
+        # and reformat retries read it from prompt cache rather than re-billing 20-50k
+        # tokens each time. Only the changing slides stay in the (uncached) user message.
         messages = [{"role": "user", "content": user_msg}]
 
         # Use built-in web search (version auto-selected for the model)
         tools = [self.web_search_tool(max_uses=25)]
+
+        degraded = False
+
+        def _no_web_fallback(_exc: Exception) -> str:
+            # The web-search loop failed (rate limit, exhausted retries). This fallback
+            # produces a verdict, but NO fact-checking happened — trace it and strip the
+            # fabricated verification rate rather than shipping a deck marked
+            # "web-verified" when it wasn't.
+            print(f"[Reviewer] WARNING: web-search loop failed ({type(_exc).__name__}); "
+                  "falling back to a NO-WEB review — facts are NOT web-verified this pass")
+            try:
+                from .base import report_gen_event
+                report_gen_event("degraded",
+                                 f"Reviewer web-search unavailable ({type(_exc).__name__}) — verdict is not web-verified",
+                                 {"agent": "Reviewer"})
+            except Exception:
+                pass
+            response = self.call(messages, max_tokens=24000, extra_system=plan_block)
+            return text_from_response(response)
 
         try:
             final_text, _ = self.run_tool_loop(
@@ -176,12 +197,30 @@ Produce the JSON verdict only. No commentary outside the JSON."""
                 tools=tools,
                 tool_handlers={},
                 max_tokens=24000,
+                extra_system=plan_block,
             )
-        except Exception:
-            response = self.call(messages, max_tokens=24000)
-            final_text = text_from_response(response)
+        except MaxTokensError:
+            # Truncation is NOT a web failure — adaptive thinking shares the budget with a
+            # per-slide verdict for a 20-60 slide deck. Retry once with the tool loop KEPT
+            # and double the budget, instead of surrendering fact-checking to the no-web path.
+            print("[Reviewer] verdict truncated at max_tokens — retrying WITH web tools at 48k")
+            try:
+                final_text, _ = self.run_tool_loop(
+                    messages=messages, tools=tools, tool_handlers={},
+                    max_tokens=48000, extra_system=plan_block,
+                )
+            except Exception as _exc:
+                degraded = True
+                final_text = _no_web_fallback(_exc)
+        except Exception as _exc:
+            degraded = True
+            final_text = _no_web_fallback(_exc)
 
-        return self._parse_verdict(final_text)
+        verdict = self._parse_verdict(final_text)
+        if degraded:
+            verdict["degraded"] = True
+            verdict["web_verification_rate"] = None  # no web search ran; don't record a fabricated rate
+        return verdict
 
     def review_exercises(self, exercises_content: str, cycle: int = 1) -> dict:
         """Review exercise content for practicality and completeness."""
@@ -239,10 +278,33 @@ Exercises come in different types. Apply the correct criteria for each:
 EXERCISES:
 {exercises_content}
 
-Produce JSON: {{"status": "approved"|"revise", "feedback": "...", "issues": ["unverified_tool", "stale_command", ...]}}"""
+Produce JSON: {{"status": "approved"|"revise", "feedback": "...", "issues": ["unverified_tool", "stale_command", ...], "flagged_exercises": [...]}}
+"flagged_exercises" is REQUIRED whenever status is "revise" and the content contains more than
+one exercise: the 0-BASED indices into the "exercises" array of ONLY the exercises that need
+revision (e.g. [1] if just the second exercise is flawed). The exercises you were NOT flagging
+must not be listed — they will be kept exactly as-is and only the flagged ones regenerated.
+Use [] (or omit) when status is "approved" or there is a single exercise.
+Output ONLY that JSON object — no prose before or after, no code fences, no report. Use exactly
+the three keys shown here (this replaces the per-slide verdict schema from your system prompt,
+which applies to slide reviews, not exercises)."""
 
         messages = [{"role": "user", "content": user_msg}]
         tools = [self.web_search_tool(max_uses=10)]
+
+        degraded = False
+
+        def _no_web_fallback(_exc: Exception) -> str:
+            print(f"[Reviewer] WARNING: exercise web-search loop failed ({type(_exc).__name__}); "
+                  "falling back to a NO-WEB review")
+            try:
+                from .base import report_gen_event
+                report_gen_event("degraded",
+                                 f"Exercise reviewer web-search unavailable ({type(_exc).__name__}) — not web-verified",
+                                 {"agent": "Reviewer"})
+            except Exception:
+                pass
+            response = self.call(messages, max_tokens=16000)
+            return text_from_response(response)
 
         try:
             final_text, _ = self.run_tool_loop(
@@ -253,11 +315,25 @@ Produce JSON: {{"status": "approved"|"revise", "feedback": "...", "issues": ["un
                 # with the verdict, so a tight cap could truncate the JSON.
                 max_tokens=16000,
             )
-        except Exception:
-            response = self.call(messages, max_tokens=16000)
-            final_text = text_from_response(response)
+        except MaxTokensError:
+            # Truncation ≠ web failure: retry once with tools KEPT and double the budget
+            # before surrendering fact-checking to the no-web path.
+            print("[Reviewer] exercise verdict truncated at max_tokens — retrying WITH web tools at 32k")
+            try:
+                final_text, _ = self.run_tool_loop(
+                    messages=messages, tools=tools, tool_handlers={}, max_tokens=32000,
+                )
+            except Exception as _exc:
+                degraded = True
+                final_text = _no_web_fallback(_exc)
+        except Exception as _exc:
+            degraded = True
+            final_text = _no_web_fallback(_exc)
 
-        return self._parse_simple_verdict(final_text)
+        verdict = self._parse_simple_verdict(final_text)
+        if degraded and isinstance(verdict, dict):
+            verdict["degraded"] = True
+        return verdict
 
     def _parse_verdict(self, text: str) -> dict:
         try:
@@ -327,10 +403,25 @@ Produce JSON: {{"status": "approved"|"revise", "feedback": "...", "issues": ["un
             except Exception as e:
                 print(f"[Reviewer] WARNING: simple verdict reformat retry failed: {e!r}")
 
-        print("[Reviewer] WARNING: simple verdict unparseable — failing closed to revise")
+        # APPROVE, not revise: "revise" here triggered a full exercise regeneration (the
+        # ~14-minute rebuild class) driven by zero actual findings — a malformed *review*
+        # is not evidence of a defective *exercise*. This mirrors _parse_verdict's
+        # deliberate fail-open for slides. The malformed_review marker + degraded event
+        # keep the skipped check visible instead of silent.
+        print("[Reviewer] WARNING: simple verdict unparseable after retry — approving "
+              "(a malformed review must not trigger a rebuild); flagged as malformed_review")
+        try:
+            from .base import report_gen_event
+            report_gen_event("degraded",
+                             "Exercise review verdict was malformed — exercise shipped without "
+                             "an automated fact-check verdict",
+                             {"agent": "Reviewer"})
+        except Exception:
+            pass
         return {
-            "status": "revise",
-            "feedback": "The automated reviewer could not produce a verdict. Re-check the content "
-                        "for unverified tools, stale commands, and incorrect answers before approving.",
+            "status": "approved",
+            "feedback": "The automated reviewer could not produce a parseable verdict; the "
+                        "exercise was not fact-check-gated. Spot-check tools, commands, and "
+                        "answers during creator review.",
             "issues": ["malformed_review"],
         }

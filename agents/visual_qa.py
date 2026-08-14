@@ -12,21 +12,20 @@ from .. import keyring
 QA_SYSTEM_PROMPT = """\
 You are a visual QA inspector for presentation slides. You receive rendered slide images and check for visual defects.
 
-Inspect each slide for these 13 categories of defects:
+Inspect each slide for these 12 categories of defects:
 
 1. **overlapping_elements** — text on text, text covering diagrams, elements stacked on each other
 2. **text_overflow** — text cut off at edges, extending past the visible slide area
 3. **insufficient_margins** — elements too close to slide edges (< 0.5 inch visually)
 4. **low_contrast** — text hard to read against its background color
-5. **layout_repetition** — consecutive slides with identical visual layout pattern (e.g., three bullet slides in a row). EXCEPTION: a multiple-choice "Quick check"/comprehension-question slide immediately followed by the SAME slide with one option highlighted (accent fill and/or a ✓) is an INTENTIONAL question→answer-reveal pair, not a defect — never flag it as repetition or a duplicate.
-6. **placeholder_artifacts** — "Lorem ipsum", "[source]", "[insert X]", raw markdown syntax (**, ##, etc.), template placeholders left in
-7. **empty_slide** — slides with barely any content or completely blank
-8. **diagram_legibility** — diagram/chart labels too small, clipped, or unreadable
-9. **inconsistent_styling** — slides that don't match the expected color palette or font style
-10. **excessive_text** — a slide so text-dense it reads as a document or wall of text, or is visually cramped/hard to scan: full paragraphs where phrases would do, or text packed so tightly legibility suffers. This is a LEGIBILITY / DENSITY judgment, NOT a word count — a clean, well-structured text-forward slide (bullets, columns, or a table that explains a concept) is FINE even if it carries more words than a visual slide; only flag text that is genuinely unstructured, paragraph-like, or cramped. EXCEPTIONS: references / sources / citations / bibliography / further-reading slides are always exempt (full citations legitimately run long); and never flag a slide the plan intended as text-forward merely for carrying explanatory text — flag it only if the text is actually cramped or unreadable.
-11. **broken_connectors** — connecting lines in diagrams that don't actually reach their target shapes, protrude past them, overlap/cut through other shapes, or stop short. Lines should start at one shape edge and end at another — flag any that look disconnected, misrouted, or visually broken
-12. **misaligned_elements** — elements that visually appear intended to be aligned but aren't. Check: titles or centered text that's slightly off-center on the slide; icons or images that don't line up vertically with adjacent text; columns or grid items at inconsistent heights; rows of elements with uneven spacing. Only flag when the misalignment is clearly unintentional — deliberate asymmetric or staggered layouts are fine
-13. **inaccurate_visual** — an image, screenshot, diagram, chart, or icon that does NOT match what the slide's own title, caption, or body text says it shows. This is a CONTENT/accuracy check, not a layout check — read the slide's words, then look at its visual and judge whether they agree. Flag when: the slide names or describes a specific interface/screen/product but the image is a logo, wordmark, generic branding, or an unrelated stock photo; a diagram or chart contradicts, misrepresents, or omits the facts stated in the slide text; a screenshot is labeled as one thing but clearly shows another; data in a chart doesn't match the numbers in the text. Do NOT flag a reasonable, relevant illustration just because it isn't a perfect, official, or high-resolution example — only flag a genuine mismatch between what the slide claims and what the visual actually depicts. Each slide's label may include what the PLAN intended it to show ("Planned visual: ..."); when present, verify the rendered visual against that plan, and use the planned title to confirm you're judging the right slide. A slide whose label says it is TEXT-ONLY has no primary visual — NEVER flag it under inaccurate_visual.
+5. **placeholder_artifacts** — "Lorem ipsum", "[source]", "[insert X]", raw markdown syntax (**, ##, etc.), template placeholders left in, and raw TeX/LaTeX markup shown as literal text (dollar-sign math like $x$, \frac, or caret/brace superscripts like e^{-x} visible on the slide — math must appear typeset or as Unicode, never as markup)
+6. **empty_slide** — slides with barely any content or completely blank. EXCEPTION: a slide whose label says it is an ANIMATION slide is INTENTIONALLY a bare title/poster frame — the motion is overlaid separately, the builder is forbidden to add content to it, and it must NEVER be flagged as empty_slide (or any sparseness complaint)
+7. **diagram_legibility** — diagram/chart labels too small, clipped, or unreadable
+8. **inconsistent_styling** — slides that don't match the expected color palette or font style
+9. **excessive_text** — a slide so text-dense it reads as a document or wall of text, or is visually cramped/hard to scan: full paragraphs where phrases would do, or text packed so tightly legibility suffers. This is a LEGIBILITY / DENSITY judgment, NOT a word count — a clean, well-structured text-forward slide (bullets, columns, or a table that explains a concept) is FINE even if it carries more words than a visual slide; only flag text that is genuinely unstructured, paragraph-like, or cramped. EXCEPTIONS: references / sources / citations / bibliography / further-reading slides are always exempt (full citations legitimately run long); and never flag a slide the plan intended as text-forward merely for carrying explanatory text — flag it only if the text is actually cramped or unreadable.
+10. **broken_connectors** — an arrow or connector in a diagram that is wrong PHYSICALLY or in its MEANING. PHYSICAL: a line that doesn't reach its target shape, protrudes past it, overlaps/cuts through other shapes, or stops short — connectors should run cleanly from one shape edge to another. DIRECTION / TARGET: an arrow that points to the WRONG shape, or in the WRONG direction, versus what the diagram's own labels or the "Planned visual" describe — e.g. the intended flow is A → B → C but an arrow runs B → A, links to the wrong node, or the arrowhead sits on the wrong end. Read the diagram's labels (and the "Planned visual" when given) and confirm every connector joins the correct source to the correct target, pointing the correct way.
+11. **misaligned_elements** — elements that visually appear intended to be aligned but aren't. Check: titles or centered text that's slightly off-center on the slide; icons or images that don't line up vertically with adjacent text; columns or grid items at inconsistent heights; rows of elements with uneven spacing. Only flag when the misalignment is clearly unintentional — deliberate asymmetric or staggered layouts are fine
+12. **inaccurate_visual** — an image, screenshot, diagram, chart, or icon that does NOT match what the slide's own title, caption, or body text says it shows. This is a CONTENT/accuracy check, not a layout check — read the slide's words, then look at its visual and judge whether they agree. Flag when: the slide names or describes a specific interface/screen/product but the image is a logo, wordmark, generic branding, or an unrelated stock photo; a diagram or chart contradicts, misrepresents, or omits the facts stated in the slide text; a screenshot is labeled as one thing but clearly shows another; data in a chart doesn't match the numbers in the text. Do NOT flag a reasonable, relevant illustration just because it isn't a perfect, official, or high-resolution example — only flag a genuine mismatch between what the slide claims and what the visual actually depicts. Each slide's label may include what the PLAN intended it to show ("Planned visual: ..."); when present, verify the rendered visual against that plan — not just the topic but the CONSTRUCTION and ORIENTATION: flag a diagram whose flow runs the wrong way, axes/elements flipped, rotated, or mirrored incorrectly, the wrong items grouped or connected, labels attached to the wrong part, or steps ordered against what the labels say. The visual must be BUILT correctly, not merely be about the right thing. Use the planned title to confirm you're judging the right slide. A slide whose label says it is TEXT-ONLY has no primary visual — NEVER flag it under inaccurate_visual.
 
 You will also be given the expected style palette (colors, fonts) so you can check for consistency.
 
@@ -50,7 +49,8 @@ SEVERITY — set "severity" on every flagged slide so we don't spend a full rebu
 cosmetic nit:
 - "critical": the slide looks broken or WRONG to a learner — text cut off / overflowing the slide,
   elements overlapping so content is obscured, unreadable low-contrast text, placeholder or template
-  artifacts, an empty slide, unreadable diagram/chart labels, broken or misrouted connectors, or a
+  artifacts, an empty slide (but never an ANIMATION poster frame — those are intentionally bare),
+  unreadable diagram/chart labels, broken or misrouted connectors, or a
   visual that contradicts the slide's own text (inaccurate_visual).
 - "minor": a small aesthetic imperfection that does NOT impede understanding — a slightly off-center
   title, a few words over the text limit, mild palette/style inconsistency, or slightly uneven spacing.
@@ -75,17 +75,26 @@ class VisualQAAgent:
                 only_indices: Optional[list[int]] = None,
                 revision_feedback: str = "",
                 max_words_per_slide: int = 20,
-                slide_intents: Optional[dict] = None) -> dict:
+                slide_intents: Optional[dict] = None,
+                prior_defects: Optional[dict] = None,
+                expected_total: Optional[int] = None) -> dict:
         """Inspect slides of a PPTX for visual defects.
 
         Args:
             only_indices: If provided, only inspect these 0-based slide indices.
             revision_feedback: If set, only check whether this revision was addressed.
+            prior_defects: {0-based index: what the previous QA pass flagged + the fix the
+                builder was instructed to make} — shown to the model per slide so a re-pass
+                verifies the FIX rather than judging the slide cold.
+            expected_total: deck length when only_indices was computed. If the rendered deck
+                no longer has that many slides, the indices are stale (builder added/removed
+                slides) and the restriction is DROPPED — full inspection is the safe fallback.
 
         Returns:
             {
                 "status": "pass" | "fail" | "error",
                 "defect_count": int,
+                "slide_total": int,  # rendered deck length (for the caller's next-pass scoping)
                 "slides": [
                     {
                         "slide_index": int,  # 0-based
@@ -97,7 +106,8 @@ class VisualQAAgent:
             }
         """
         try:
-            return self._inspect_inner(pptx_path, style_palette, only_indices, revision_feedback, max_words_per_slide, slide_intents)
+            return self._inspect_inner(pptx_path, style_palette, only_indices, revision_feedback,
+                                       max_words_per_slide, slide_intents, prior_defects, expected_total)
         except Exception as e:
             traceback.print_exc()
             print(f"[VisualQA] ERROR: inspection failed — {e}", flush=True)
@@ -107,20 +117,26 @@ class VisualQAAgent:
                         only_indices: Optional[list[int]] = None,
                         revision_feedback: str = "",
                         max_words_per_slide: int = 20,
-                        slide_intents: Optional[dict] = None) -> dict:
+                        slide_intents: Optional[dict] = None,
+                        prior_defects: Optional[dict] = None,
+                        expected_total: Optional[int] = None) -> dict:
         """Core inspection logic, may raise."""
         from ..tools.qa_render import render_all_slides
         from .base import _retry_api_call, extract_json
 
         jpegs = render_all_slides(pptx_path)
         if not jpegs:
-            return {"status": "pass", "defect_count": 0, "slides": []}
+            return {"status": "pass", "defect_count": 0, "slides": [], "slide_total": 0}
 
         # Clean up the temp render directory after we're done reading files
         _qa_render_dir = str(Path(jpegs[0]).parent) if jpegs else None
 
         # Filter to only requested indices if specified
         indexed_jpegs = list(enumerate(jpegs))
+        if only_indices is not None and expected_total is not None and len(jpegs) != expected_total:
+            print(f"[VisualQA] deck length changed ({expected_total} → {len(jpegs)}) — "
+                  f"stale only_indices dropped, inspecting the full deck", flush=True)
+            only_indices = None
         if only_indices is not None:
             target = set(only_indices)
             indexed_jpegs = [(i, j) for i, j in indexed_jpegs if i in target]
@@ -128,7 +144,7 @@ class VisualQAAgent:
                 if _qa_render_dir:
                     import shutil
                     shutil.rmtree(_qa_render_dir, ignore_errors=True)
-                return {"status": "pass", "defect_count": 0, "slides": []}
+                return {"status": "pass", "defect_count": 0, "slides": [], "slide_total": len(jpegs)}
 
         # Batch slides into groups of BATCH_SIZE
         batches: list[list[tuple[int, str]]] = []
@@ -147,7 +163,8 @@ class VisualQAAgent:
         if style_palette:
             palette_str = f"\n\nExpected style palette:\n{json.dumps(style_palette, indent=2)}"
 
-        for batch in batches:
+        def _inspect_batch(batch):
+            batch_defects: list[dict] = []
             content_blocks: list[dict] = []
             for slide_num, jpeg_path in batch:
                 # Label for the slide, plus what the plan intended it to show (if known)
@@ -155,6 +172,13 @@ class VisualQAAgent:
                 _label = f"Slide {slide_num + 1}:"
                 if slide_intents and slide_num in slide_intents:
                     _label += f" [{slide_intents[slide_num]}]"
+                # Re-pass context: what the previous QA pass flagged here and the fix the
+                # builder was instructed to make — so this pass verifies the fix landed
+                # (and didn't break anything else) instead of judging the slide cold.
+                if prior_defects and slide_num in prior_defects:
+                    _label += (f" [FLAGGED LAST QA PASS — the builder was instructed:"
+                               f" {prior_defects[slide_num]} — verify this fix was applied and"
+                               f" check the slide for any NEW problems the edit introduced.]")
                 content_blocks.append({
                     "type": "text",
                     "text": _label,
@@ -218,7 +242,7 @@ class VisualQAAgent:
                 # Robust parse: handles fenced ```json blocks and surrounding
                 # prose (same helper the reviewer uses), not just bare JSON.
                 batch_result = extract_json(raw_text)
-                all_defects.extend(self._defects_from(batch_result))
+                batch_defects.extend(self._defects_from(batch_result))
             except (json.JSONDecodeError, ValueError, KeyError, IndexError) as parse_err:
                 slide_nums = [s + 1 for s, _ in batch]
                 # The model answered in prose instead of JSON. Dropping the batch
@@ -238,7 +262,7 @@ class VisualQAAgent:
                 if raw_text:
                     try:
                         reformatted = self._reformat_to_json(raw_text)
-                        all_defects.extend(self._defects_from(extract_json(reformatted)))
+                        batch_defects.extend(self._defects_from(extract_json(reformatted)))
                         recovered = True
                         print(f"[VisualQA] recovered slides {slide_nums} via JSON reformat", flush=True)
                     except Exception as reformat_err:
@@ -250,12 +274,31 @@ class VisualQAAgent:
                         flush=True,
                     )
                     for s, _ in batch:
-                        all_defects.append({
+                        batch_defects.append({
                             "slide_index": s,
                             "issues": ["qa_unparsed"],
+                            # "minor", explicitly: without a severity these would default to
+                            # critical and force a full builder rebuild for slides nobody
+                            # actually diagnosed. An unverified slide is not a known defect.
+                            "severity": "minor",
                             "description": "QA response could not be parsed; this slide was not verified.",
                             "suggestion": "Re-inspect for overlapping text, text overflow, and broken or misrouted connectors.",
                         })
+            return batch_defects
+
+        # Inspect batches concurrently — each is an independent vision call. Threads are
+        # fine (blocking network I/O releases the GIL); ThreadPoolExecutor.map preserves
+        # batch order, so the aggregated defects match the old sequential result exactly.
+        if len(batches) <= 1:
+            for _b in batches:
+                all_defects.extend(_inspect_batch(_b))
+        else:
+            from concurrent.futures import ThreadPoolExecutor
+            # 8 (was 4): Anthropic limits sit at ~100% headroom in every build log; on a
+            # 25-batch deck this halves the wall-clock of a full QA pass.
+            with ThreadPoolExecutor(max_workers=min(8, len(batches))) as _ex:
+                for _bd in _ex.map(_inspect_batch, batches):
+                    all_defects.extend(_bd)
 
         if _qa_render_dir:
             import shutil
@@ -267,6 +310,7 @@ class VisualQAAgent:
             "status": "fail" if defect_count > 0 else "pass",
             "defect_count": defect_count,
             "critical_count": critical_count,
+            "slide_total": len(jpegs),
             "slides": all_defects,
         }
 

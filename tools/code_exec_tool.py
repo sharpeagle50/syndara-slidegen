@@ -42,10 +42,18 @@ def run_pptx_code(code: str, pptx_path: str) -> dict:
     from pptx import Presentation
     from pptx.util import Inches, Pt, Emu
     from pptx.dml.color import RGBColor
-    from pptx.enum.text import PP_ALIGN
+    from pptx.enum.text import PP_ALIGN, MSO_AUTO_SIZE
     from pptx.enum.shapes import MSO_SHAPE
     import os as _os
     import io as _io
+
+    def _safe_import(name, _globals=None, _locals=None, fromlist=(), level=0):
+        # The targeted-edit prompt instructs the agent to `from pptx.enum.text import …`.
+        # The sandbox strips __import__, so those statements used to fail and every edit
+        # errored. Permit imports from the pptx package only; block everything else.
+        if name == "pptx" or name.startswith("pptx."):
+            return __import__(name, _globals, _locals, fromlist, level)
+        raise ImportError(f"import of {name!r} is not allowed in the pptx edit sandbox")
 
     pptx_path = str(Path(pptx_path).resolve())
     Path(pptx_path).parent.mkdir(parents=True, exist_ok=True)
@@ -66,9 +74,11 @@ def run_pptx_code(code: str, pptx_path: str) -> dict:
         "Emu": Emu,
         "RGBColor": RGBColor,
         "PP_ALIGN": PP_ALIGN,
+        "MSO_AUTO_SIZE": MSO_AUTO_SIZE,
         "MSO_SHAPE": MSO_SHAPE,
         "pptx_path": pptx_path,
         "__builtins__": {
+            "__import__": _safe_import,
             "print": lambda *a, **kw: stdout_capture.write(" ".join(str(x) for x in a) + "\n"),
             "range": range, "len": len, "enumerate": enumerate,
             "zip": zip, "list": list, "dict": dict, "tuple": tuple, "set": set,
@@ -87,6 +97,10 @@ def run_pptx_code(code: str, pptx_path: str) -> dict:
             if sh.has_text_frame:
                 parts.append(sh.text_frame.text[:100])
             parts.append(f"{sh.left},{sh.top},{sh.width},{sh.height}")
+        # Include speaker notes so a notes-only edit (which the edit prompt explicitly
+        # allows) is detected as a change instead of reporting "nothing touched".
+        if slide.has_notes_slide and slide.notes_slide.notes_text_frame:
+            parts.append("NOTES:" + slide.notes_slide.notes_text_frame.text[:200])
         return hash(tuple(parts))
 
     before_hashes = {i: _slide_hash(s) for i, s in enumerate(prs.slides)}

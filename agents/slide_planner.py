@@ -13,7 +13,10 @@ from __future__ import annotations
 import re
 import time
 
-from .base import BaseAgent, STYLE_RULE, strip_em_dashes, visual_directive
+from .base import (
+    BaseAgent, STYLE_RULE, strip_em_dashes, visual_directive,
+    extract_json, text_from_response,
+)
 
 
 SLIDE_PLANNER_SYSTEM = """You are the Syndara Slide Content Researcher.
@@ -90,8 +93,12 @@ SOURCE QUALITY AND FACT-CHECKING (do this as you go, not at the end)
   adoption) get a brief mention at most. When a newer tool is challenging
   an established one — real practitioners switching, adoption growing —
   cover both and explain what's driving the shift.
-- Cite every non-obvious fact. Inline citations like `[source: vendor.com/page]`
-  or `[source: Gartner 2025 report]` so the creator can sanity-check.
+- Track a source for every non-obvious fact — but record it in the slide's
+  **Sources:** field (and the **Data source** field for any on-slide statistic),
+  NEVER in the spoken speaker notes. Write sources as `vendor.com/page` or
+  `Gartner 2025 report` so the creator can sanity-check; they roll up to the end
+  references slide. Sources are for the slide and the references list, never for
+  the narration.
 - Any slide that states a STATISTIC, exact figure, percentage, dollar amount,
   date, or other very specific factual claim MUST carry its source ON that slide,
   not only on the end references slide. You signal this per slide with the **Data
@@ -100,8 +107,8 @@ SOURCE QUALITY AND FACT-CHECKING (do this as you go, not at the end)
   between a slide that needs an in-slide reference and one that doesn't — the
   builder renders the Data source verbatim when it isn't 'N/A', so decide the
   exact wording here and the builder never has to.
-  When you've cross-verified a shaky source, cite BOTH the original and
-  the confirming source: `[source: blog.com/post; confirmed: reuters.com/article]`.
+  When you've cross-verified a shaky source, record BOTH the original and
+  the confirming source in the Sources field: `blog.com/post (confirmed: reuters.com/article)`.
 
 OUTPUT FORMAT (strict — follow this EXACTLY, field by field)
 Return ONLY markdown. No JSON, no code fences around the whole thing, no
@@ -126,6 +133,12 @@ contains a summary or narration, the downstream system cannot parse it.
 **Layout:** <one of: title_slide | bullet_slide | comparison_slide |
 stats_slide | steps_slide | chart_slide | flowchart_slide | image_slide |
 summary_slide | section_divider | agenda_slide | quote_slide>
+  (Layout is a coarse STRUCTURAL label only. The Visual **Type** below is what
+  actually decides whether the slide carries a visual — never treat a Layout name
+  as a mandate for one. A text-forward slide is bullet_slide / comparison_slide /
+  summary_slide with **Type:** none; only pick chart_slide / stats_slide /
+  steps_slide / flowchart_slide / image_slide when the slide genuinely has that
+  visual per the layout guidance and the creator's request.)
 
 **Visual elements** (what the learner SEES as the primary visual):
 - **Type:** <exactly one of: none | chart | flowchart | sequence_diagram |
@@ -181,7 +194,13 @@ slide might only need 10–20 words; a dense concept slide might need 250):
 language — use "you", "we", "let's". Include: concrete explanations,
 real examples, step-by-step tool walkthroughs, exact commands/prompts,
 transitions to the next slide, why this matters, common mistakes.
-Cite every non-obvious fact inline: `[source: url-or-name]`.
+NEVER put source citations in these notes — they are read ALOUD by TTS, and a
+citation, URL, or "according to Gartner / per Britannica" attribution has no place
+in spoken narration. Every source belongs in the **Sources:** field, the **Data
+source** field (printed on the slide), image **Attribution**, and the end
+references slide — NEVER in the narration. The ONLY exception is when naming the
+source is itself fundamental to the learning (e.g. the lesson is ABOUT that
+specific landmark study, law, or standard) — which is very rare.
 OPTIONAL — if this slide uses a PROGRESSIVE BUILD (see the section below),
 write the notes as the build SCRIPT instead: start with [REVEAL] and place
 [[N | what appears/disappears]] markers inline at the exact word each beat
@@ -191,9 +210,11 @@ narration.>
 **Physical slides:** <ONLY on build slides: "1 + <M> beats = <M+1>" where M
 is the number of [[N | …]] markers. Omit this line entirely on normal slides.>
 
-**Sources:**
-- <url 1>
-- <url 2>
+**Sources:** (every source backing THIS slide's facts — url or citation, one per
+line. This is METADATA that rolls up to the references slide; it is NOT narrated
+and never appears in the speaker notes. Write 'N/A' if the slide states no sourced fact.)
+- <url or citation 1>
+- <url or citation 2>
 
 ---
 
@@ -229,11 +250,17 @@ CONTENT PHILOSOPHY (critical — the next agent reads this)
   10–20 words; a concept-heavy slide might need 250. They will be read
   aloud by a TTS narrator — write conversationally, not as an essay.
   Use "you" and "we". Pause for emphasis with short sentences.
-- VISUALS ARE THE SLIDE. Every content slide should have a visual as its
-  primary element — the text is secondary. Favor visuals wherever they add
-  real information: flowcharts for processes, charts for comparisons / stats,
-  diagrams for architectures, images for illustrative concepts. A flowchart
-  of a workflow beats 4 bullets describing the same workflow.
+- VISUALS FOLLOW THE LAYOUT GUIDANCE ABOVE — they are NOT automatic, and NOT every
+  slide needs one. Where that guidance and the creator's request call for a visual,
+  make it the slide's primary element (text secondary) and favor visuals wherever
+  they add real information: flowcharts for processes, charts for comparisons /
+  stats, diagrams for architectures, images for illustrative concepts (a flowchart
+  of a workflow beats 4 bullets describing it). But where the guidance leans
+  text-forward — or the creator asked for mostly text / bullet slides — a clean
+  text-forward slide (bullets, columns, a small table) is the RIGHT answer, and you
+  must NOT add a decorative visual (icon tiles, an illustrative image) just to avoid
+  bullets. Reserve visuals for genuinely quantitative, spatial, relational, or
+  sequential content a visual conveys better than words.
 - Pick the RIGHT visual type for the content — these map 1:1 to the tools
   the Builder will use:
     * chart → bar/line/pie/scatter for quantitative comparisons, stats, trends
@@ -281,13 +308,16 @@ LAYOUT PALETTE (pick the best fit per slide)
   chart_slide, flowchart_slide, image_slide, question_slide
 
 HEURISTICS
-- Open with title_slide. Close with summary_slide, then ALWAYS end with a
-  references/citations slide. Don't pad the body.
+- Slide 1 is ALWAYS a title_slide — this is MANDATORY, never skip it and never
+  let another layout (or an animation) open the module in its place. Close with
+  summary_slide, then ALWAYS end with a references/citations slide. Don't pad
+  the body.
 - The closing references slide is MANDATORY — never omit it and never leave it
-  empty. It must list EVERY source used anywhere in the module: every inline
-  `[source: ...]` citation, every slide's **Data source**, and every image's
+  empty. It must list EVERY source used anywhere in the module: every slide's
+  **Sources:** list, every slide's **Data source**, and every image's
   **Attribution**. One line per source, each a full citation — source name or page
-  title + the URL. If a fact or image had a source, it MUST appear here.
+  title + the URL. If a fact or image had a source, it MUST appear here (and this
+  end slide is the ONLY place a bare source list is spoken-silent — see below).
 - If there are more sources than fit legibly on ONE slide, continue onto
   additional references slides (a 2nd, 3rd, … at the end) rather than cramming or
   shrinking text to fit — readability wins. Split the list across as many
@@ -297,14 +327,20 @@ HEURISTICS
   thank you for listening!". Any ADDITIONAL references slides have EMPTY speaker
   notes — no narration (the sign-off was already said; they're just more
   references). NEVER read URLs, citations, or source names aloud.
-- Vary layouts — don't let the deck fall into a rut (every slide a bullet_slide,
-  or every slide a diagram/table). Mix visual-forward and text-forward slides.
+- Vary layouts BY DEFAULT — don't let the deck fall into a rut (every slide a
+  bullet_slide, or every slide a diagram/table); mix visual-forward and
+  text-forward slides. This is the ONLY place layout variety is decided — nothing
+  downstream enforces it. BUT it yields to the creator's request: if they asked
+  for a consistent or uniform structure ("bullets on every slide", "same format
+  throughout", "keep it simple/plain"), keep it consistent — a deliberately
+  uniform deck is correct, not a rut.
 - The prompt gives a TARGET slide count and a hard range. Fill the deck out
   to roughly the target; don't settle at the low end — a thin deck under-covers
   the material. Stay within the range (never above the maximum), and prefer
   more focused slides over fewer overloaded ones.
-- Put comprehension questions only where they genuinely check understanding,
-  at most twice per module. Mark them with **Layout:** `question_slide`.
+- Place comprehension questions where they best check understanding; the EXACT
+  number to include is specified below under IN-SLIDE QUESTIONS (treat it as a
+  firm count, not a maximum). Mark them with **Layout:** `question_slide`.
   For question slides, use this structure:
     - **On-slide text**: The question + 3-4 answer options (labeled A, B, C, D)
     - **Speaker notes**: The correct answer + brief explanation of WHY it's correct
@@ -313,14 +349,22 @@ HEURISTICS
   and one showing the same content with the correct answer revealed. This
   creates a click-to-reveal animation in the downloadable PPTX.
 
-PROGRESSIVE BUILDS (optional per-slide animation — YOU choreograph it here)
-You may animate a slide so its elements fade in and out in sync with the
-narration instead of all appearing at once. ALL animation thinking happens in
-THIS plan; the builder only executes your script. It is OPTIONAL and OFF by
-default — most slides should stay static.
+PROGRESSIVE BUILDS (reveal a slide's own elements as it's narrated — YOU choreograph it here)
+A progressive build is NOT a Manim animation. It has nothing to do with Visual
+**Type:** `animation` (a full-screen motion video, covered separately) and
+nothing to do with whether slide animations are enabled — a build is a
+click-to-reveal on an ORDINARY slide: the text and elements YOU author fade in
+one at a time, in sync with the narration, instead of all appearing at once.
+Builds are always available on any content slide. The builder only executes
+your script; ALL build choreography happens in THIS plan. DEFAULT TO A BUILD
+whenever a slide carries several distinct points, bullets, lines, or steps that
+are narrated one after another — reveal each as the narration reaches it so the
+learner reads only the current point, never the whole wall of text at once.
+That sequential-points case is COMMON, so builds should be common too. Stay
+static only for the exceptions listed under WHEN TO STAY STATIC below.
 
 HOW IT WORKS (the mechanics your script must respect):
-- You design ONE final slide layout. Each animation beat is that same slide
+- You design ONE final slide layout. Each build beat is that same slide
   with some elements shown or hidden — elements NEVER move, resize, or
   restyle between beats, and the only effect is fade in / fade out.
 - Every [[N | …]] marker in the script creates ONE additional physical slide
@@ -346,8 +390,8 @@ YOUR CREATIVE PALETTE (full freedom — any choreography these moves compose):
 - transient elements: show something for one beat, then it leaves
 - re-entries: an element leaves and comes back later
 - staged replacement: hide version A while showing version B (a "morph")
-- and most often: no animation at all — a good static slide beats a
-  pointless build
+- no build at all when a slide is a single idea or single visual — a build
+  earns its place only when there are separate points to stage in sequence
 Guardrails: every beat needs narration words (that's its timing); at most ~6
 beats per slide; transients and re-entries are seasoning, not the norm; the
 slide's FINAL state must stand on its own as a complete, correct slide.
@@ -370,21 +414,62 @@ COMPLETE EXAMPLE of a build slide's Speaker notes (three beats):
   written checklist — and the errors stop slipping.
 (That slide's **Physical slides:** line reads "1 + 3 beats = 4".)
 
-WHEN TO ANIMATE: strongest on text-heavy slides (reveal each point as it's
-narrated so the learner reads only the current one) and element-dense diagrams
-that would overwhelm if shown at once. Do NOT animate title slides, quotes,
-single-visual slides, references, or question_slides (those have their own
-reveal). NEVER put a build on a slide whose Visual **Type:** is `animation`
-(the full-bleed animation clip covers the slide — the two effects conflict).
-Always your judgment — when unsure, stay static.
+WHEN TO BUILD (the default for these — and they are the common case): any slide
+with several separate points, bullets, lines, or steps that are narrated in
+sequence. Reveal each as its narration arrives so the learner reads only the
+current one, never the whole list at once. Also element-dense diagrams that
+would overwhelm if shown all at once. If a content slide has 3+ distinct lines
+or bullets that are spoken one after another, it should almost always build —
+staging them one at a time is the whole point.
 
-SLIDE BUDGET: builds are free but consume slide count — a slide with M markers
-occupies M+1 physical slides of this module's target. Add the
-**Physical slides:** line on every build slide and count builds toward the
-deck-length range. If you animate heavily, use fewer canonical slides; if the
-material needs many slides AND heavy animation, the deck needs a higher slide
-count — never exceed the range.
+WHEN TO STAY STATIC (the exceptions, not the norm): title/section slides,
+quotes, a slide built around a single visual or a single unified idea,
+references, and question_slides (those have their own reveal). NEVER put a build
+on a slide whose Visual **Type:** is `animation` (the full-bleed clip covers the
+slide — the two conflict). A slide whose points genuinely land together as one
+thought can stay static — but a list of distinct points read in sequence should
+build. When a slide has separate sequential points and you're unsure, BUILD.
+
+SLIDE BUDGET: the deck-length range counts CANONICAL slides — each "## Slide N"
+is ONE slide toward the range no matter how many build beats it carries. Builds
+are genuinely free: a slide with M markers expands to M+1 physical slides at
+export, but that expansion does NOT count toward the range and must NEVER make
+you plan fewer canonical slides. Fill the deck to its full canonical count for
+the band FIRST, then add builds on top wherever motion teaches. Still add the
+**Physical slides:** line on every build slide (the builder needs it to split
+the slide) — but treat it as an export annotation only, never a charge against
+the deck-length range.
 """
+
+# ── Builds-off prompt variant ────────────────────────────────────────────────
+# When a creator turns progressive builds OFF we don't tell the model "builds exist but don't use
+# them" — we hand it a prompt in which builds are never mentioned at all. A capability the model
+# was never taught can't leak into the plan (and we stop paying tokens to teach a feature we then
+# forbid). The deterministic explosion-time backstop in web_runner stays as belt-and-suspenders.
+# The chunks below are verbatim slices of SLIDE_PLANNER_SYSTEM, assertion-checked at import so any
+# future edit to the main prompt that breaks the variant fails loudly, not silently.
+_BUILDS_NOTES_OPT = """OPTIONAL — if this slide uses a PROGRESSIVE BUILD (see the section below),
+write the notes as the build SCRIPT instead: start with [REVEAL] and place
+[[N | what appears/disappears]] markers inline at the exact word each beat
+starts. Same narration rules apply; the script must read as one continuous
+narration.>"""
+_BUILDS_PHYS_FIELD = """**Physical slides:** <ONLY on build slides: "1 + <M> beats = <M+1>" where M
+is the number of [[N | …]] markers. Omit this line entirely on normal slides.>
+
+"""
+_BUILDS_SECTION_START = "PROGRESSIVE BUILDS (reveal a slide's own elements"
+assert _BUILDS_NOTES_OPT in SLIDE_PLANNER_SYSTEM, "builds-off prompt variant out of sync (notes chunk)"
+assert _BUILDS_PHYS_FIELD in SLIDE_PLANNER_SYSTEM, "builds-off prompt variant out of sync (field chunk)"
+_bs_idx = SLIDE_PLANNER_SYSTEM.find(_BUILDS_SECTION_START)
+assert _bs_idx != -1, "builds-off prompt variant out of sync (section header)"
+# The PROGRESSIVE BUILDS section runs to the end of the prompt, so slicing at its header drops it whole.
+SLIDE_PLANNER_SYSTEM_STATIC = (
+    SLIDE_PLANNER_SYSTEM[:_bs_idx]
+    .replace(_BUILDS_NOTES_OPT, ">")
+    .replace(_BUILDS_PHYS_FIELD, "")
+    .rstrip()
+    + "\n"
+)
 
 
 def slide_range_for(target: int) -> tuple[int, int]:
@@ -401,13 +486,33 @@ def slide_range_for(target: int) -> tuple[int, int]:
     return (40, 60)
 
 
+def deck_length_floor(band_target: int) -> int:
+    """The HIGH default FLOOR for a deck-length band: a deck should run to MORE than this many slides
+    (up to the band max) so a creator gets a full deck for the length they paid for — unless the
+    creator's own instructions say otherwise (that always overrides). Bands: short 1-20 (floor 15),
+    medium 20-40 (floor 35), long 40-60 (floor 55)."""
+    if band_target <= 20:
+        return 15
+    if band_target <= 40:
+        return 35
+    return 55
+
+
 class SlidePlannerAgent(BaseAgent):
     # Research loop needs web tools — that's the whole point of this stage.
     allowed_tool_names = ["web_search", "web_fetch", "find_image"]
     system_prompt = SLIDE_PLANNER_SYSTEM + STYLE_RULE
+    # Planning a well-structured, pedagogically-sound deck is genuinely multi-step reasoning — the
+    # single most reasoning-heavy stage — so let Opus 5 use adaptive thinking here (it was running
+    # thinking-off). The plan-generation calls use max_tokens=128000, so thinking has ample headroom
+    # and can't crowd out the plan. (allocate_animations opts back out — see disable_thinking there.)
+    adaptive_thinking = True
 
-    def _apply_max_words(self, max_words: int):
-        self.system_prompt = SLIDE_PLANNER_SYSTEM.replace(
+    def _apply_max_words(self, max_words: int, progressive_builds: bool = True):
+        # Builds-off decks get the variant prompt with every progressive-build mention removed —
+        # the model can't plan a feature it was never taught (see SLIDE_PLANNER_SYSTEM_STATIC).
+        base = SLIDE_PLANNER_SYSTEM if progressive_builds else SLIDE_PLANNER_SYSTEM_STATIC
+        self.system_prompt = base.replace(
             "{max_words_per_slide}", str(max_words)
         ) + STYLE_RULE
 
@@ -425,12 +530,14 @@ class SlidePlannerAgent(BaseAgent):
         image_ctx: dict | None = None,
         slide_animations: bool = False,
         animation_budget: int = 4,
+        progressive_builds: bool = True,
     ) -> dict:
         """Return a slide-by-slide content plan (markdown) for the given outline.
 
         max_questions caps in-slide comprehension question_slides (0 = none).
         """
-        self._apply_max_words(outline.get("max_words_per_slide") or 20)
+        self._apply_max_words(outline.get("max_words_per_slide") or 20,
+                              progressive_builds=progressive_builds)
         # The visual↔text slider level fills the {layout_lean} placeholder — it IS the layout section.
         self.system_prompt = self.system_prompt.replace(
             "{layout_lean}", visual_directive(outline.get("visual_level")))
@@ -448,8 +555,9 @@ class SlidePlannerAgent(BaseAgent):
 
         max_words_per_slide = outline.get("max_words_per_slide") or 20
         explicit_target = outline.get("slide_count")
-        target_slides = explicit_target or max(outline_slide_count, 40)
-        slide_lo, slide_hi = slide_range_for(target_slides)
+        _band_target = explicit_target or max(outline_slide_count, 40)
+        slide_floor = deck_length_floor(_band_target)                  # high default floor
+        slide_lo, slide_hi = slide_range_for(_band_target)             # hard band bounds (backstop)
         max_questions = max(0, int(max_questions))
         if max_questions <= 0:
             questions_directive = (
@@ -458,9 +566,11 @@ class SlidePlannerAgent(BaseAgent):
             )
         else:
             questions_directive = (
-                f"IN-SLIDE QUESTIONS: Include AT MOST {max_questions} comprehension "
-                f"question slide(s) — only where they genuinely check understanding, "
-                f"never as filler. Fewer is fine. Mark each with **Layout:** "
+                f"IN-SLIDE QUESTIONS: Include EXACTLY {max_questions} comprehension "
+                f"question slide(s) — the creator chose this exact number, so it is a "
+                f"FIRM count, not a ceiling: include {max_questions}, no fewer and no "
+                f"more. Place them where they best check understanding, spread across "
+                f"the module rather than clustered. Mark each with **Layout:** "
                 f"`question_slide`."
             )
         tools_clean = [t.strip() for t in (available_tools or []) if t and t.strip()]
@@ -473,6 +583,8 @@ class SlidePlannerAgent(BaseAgent):
             )
         else:
             tools_directive = ""
+        # NOTE: no "builds disabled" directive is needed here — when progressive_builds is off the
+        # SYSTEM prompt variant omits the feature entirely (nothing to negate; see _apply_max_words).
         from datetime import date
         today = date.today().strftime("%B %d, %Y")
         user_msg = f"""Today's date is {today}. Use this to calibrate your research —
@@ -493,12 +605,20 @@ prior outline — you start from the title and summary above. Research the
 topic thoroughly, then design the slide-by-slide plan based on what you
 find.
 
-DECK LENGTH: aim for about {target_slides} slides (you may range from
-{slide_lo} to {slide_hi}). Fill a thorough, complete deck close to the
-target. Do NOT settle near the low end: a thin deck under-covers the
-material and short-changes the learner. Only go below {target_slides} if
-the topic genuinely cannot support more, and NEVER exceed {slide_hi}. Open
-with a title_slide and close with a summary_slide.
+DECK LENGTH: {slide_floor} is a FLOOR, not a target — land somewhat ABOVE {slide_floor}, with
+{slide_hi} as a hard ceiling you should NOT crowd (you do NOT need to reach it). Add slides wherever
+the material supports more GENUINE depth — another worked example, an edge case, a step-by-step
+breakdown, real specifics. The creator paid for a full deck of this length and should feel it's
+substantial, but a deck a few slides above the floor already delivers that — do not stretch toward
+{slide_hi}.
+  BUT quality beats count: NEVER pad, repeat, or split content into thin, near-empty, or filler
+  slides just to raise the number — a deck of useless slides is worse than a tighter, solid one.
+  Decide per topic: MORE slides when they each add real value; MORE CONDENSED when extra slides
+  would only dilute. Reach {slide_floor}+ by going deeper, not by padding.
+  OVERRIDE: if the creator's instructions say anything about length (shorter, longer, "just a few
+  slides", a specific count, "keep it concise", etc.), FOLLOW THAT — the creator's instruction
+  ALWAYS wins over this floor.
+NEVER exceed {slide_hi}. ALWAYS open with a title_slide (Slide 1, mandatory) and close with a summary_slide.
 
 {questions_directive}
 
@@ -524,9 +644,13 @@ concept slide might need 250. Write conversationally ("you", "we",
 tool-specific commands, and smooth transitions. The speaker notes ARE
 the course.
 
-VISUAL ELEMENTS: Every content slide should have a real visual. Describe
-it with enough detail that a designer could build it without guessing —
-include all labels, data values, node text, arrow directions, colors.
+VISUAL ELEMENTS: Whether a slide carries a visual is decided by the layout
+guidance and the creator's request above — not every slide needs one, and a
+text-forward slide legitimately has Type: none. But WHEN a slide has a visual,
+spec it COMPLETELY, because the builder renders exactly what you write and makes
+NO content decisions of its own: give the exact Type plus a description listing
+every label, data value, node text, arrow direction, SPECIFIC icon, and color.
+Anything you leave vague the builder is forced to invent — so leave nothing vague.
 """
         if web_images:
             user_msg += """
@@ -565,21 +689,39 @@ specify type image/photo/screenshot, describe what the visual should
 depict and the builder will create a suitable alternative diagram.
 """
         if slide_animations:
+            # The manim-vs-builds disambiguation only makes sense when builds exist in the prompt;
+            # a builds-off deck must not hear about progressive builds even in passing.
+            _manim_vs_builds = (
+                " NOTE: this is a DIFFERENT feature from PROGRESSIVE BUILDS\n"
+                "— a Manim animation is a rendered video that fills the whole slide; a progressive build reveals\n"
+                "on-slide elements on an ordinary slide. A Type: animation slide is never also a build."
+                if progressive_builds else ""
+            )
             user_msg += f"""
-ANIMATIONS ENABLED — for up to {animation_budget} slide(s) in THIS module, you may set
-**Type:** animation to make that slide a full-screen animated explainer (rendered as a short
-video and shown in place of a static slide). Use it ONLY where MOTION genuinely teaches better
-than a static diagram: something building up, moving, transforming, or unfolding step by step —
-gradient descent stepping to a minimum, vectors adding tip-to-tail, a sorting algorithm swapping,
-a process flowing through stages, a geometric construction being traced. For each animation slide,
-fill in the **Animation:** field with a concrete director's note describing the motion, and write
-the slide's speaker notes as the NARRATION that plays over it. Do NOT animate static comparisons,
-plain bullet lists, or slides where a chart/diagram already says it best. Be selective — a couple
-of great animations beat many mediocre ones. Never exceed {animation_budget} animation slides here.
+MANIM ANIMATIONS ENABLED — make EXACTLY {animation_budget} slide(s) in THIS module animations by
+setting **Type:** animation, which makes that slide a full-screen animated explainer (a Manim motion
+video rendered in place of a static slide).{_manim_vs_builds} This is a FIRM
+count the creator chose and paid for — not a
+ceiling: mark {animation_budget}, no fewer and no more. Choose the slides where MOTION teaches best —
+something building up, moving, transforming, or unfolding step by step: gradient descent stepping to
+a minimum, vectors adding tip-to-tail, a sorting algorithm swapping, a process flowing through
+stages, a geometric construction being traced. Work from the MOST motion-worthy slides down; once
+you are past the obvious ones, animate the next-best candidates to REACH the count.
+SIZE THE MODULE so it has room to hit {animation_budget}: the MANDATORY Slide-1 title_slide and the
+mandatory closing references slide are never animations, so they always stay static — never drop the
+title or let an animation open the module in its place. A separate dedicated conclusion slide is
+OPTIONAL, and to reach a high count you may skip the conclusion. Only the title_slide, the references
+slide(s), and any question_slides are off-limits to animate; everything else is fair game. The deck's visual-vs-text layout guidance (how text-forward vs visual the OTHER slides
+are) is SEPARATE from this count and never changes it: a text-heavy deck — or a creator who wrote a
+lot of text — does NOT mean fewer animations. For each animation slide, fill in the **Animation:**
+field with a concrete director's note describing the motion, and write the speaker notes as the
+NARRATION that plays over it. Only fall short of {animation_budget} if the module genuinely cannot
+hold that many content slides; never exceed it.
 """
         else:
             user_msg += """
-NOTE: Slide animations are not enabled — never set Type to 'animation'.
+NOTE: Manim slide animations are not enabled — never set Visual **Type:** to 'animation'. (This does
+NOT affect PROGRESSIVE BUILDS, which are a separate feature and remain available — keep using them.)
 """
         if assessment_questions:
             domains = set()
@@ -639,8 +781,12 @@ NOTE: Slide animations are not enabled — never set Type to 'animation'.
             else:
                 import tempfile as _tf
                 _img_dir = _tf.mkdtemp(prefix="planimg_")
-        # Very liberal cap — find_image normally takes seconds; this only stops a true hang.
-        _IMG_FIND_TIMEOUT = 240.0
+        # Cap per search. Job 208 (2026-08-12) showed searches that exhaust all candidates
+        # (vision rejecting each one) burn the FULL timeout and return nothing — at 240s that
+        # was 4 wasted minutes per dud search, 3 times in one module. 180s still allows
+        # ~8 candidate download+verify rounds; a subject that hasn't produced a verified
+        # image by then essentially never does. (Observed successes cluster at 19-153s — job 208 — so 180 keeps every success with margin; 120 would have cut off three of seven.)
+        _IMG_FIND_TIMEOUT = 180.0
 
         def _find_image_handler(subject: str = "", why: str = "") -> dict:
             import asyncio as _aio, hashlib as _hl, uuid as _uuid
@@ -672,6 +818,9 @@ NOTE: Slide animations are not enabled — never set Type to 'animation'.
                 _found_images.append({
                     "id": img_id, "path": cached["path"], "caption": cached.get("caption", ""),
                     "attribution": cached.get("attribution", ""), "source": cached.get("source", ""),
+                    "src_url": cached.get("src_url", ""),
+                    "exif_artist": cached.get("exif_artist", ""),
+                    "exif_copyright": cached.get("exif_copyright", ""),
                     "subject": subject,
                 })
                 return {"found": True, "image_id": img_id, "caption": cached.get("caption", ""),
@@ -699,6 +848,7 @@ NOTE: Slide animations are not enabled — never set Type to 'animation'.
                         if rr and rr.get("success"):
                             rr["caption"] = cm.get("caption", "")
                             rr["source_page"] = "curated"
+                            rr["src_url"] = cm["url"]
                             return rr
                 from ..tools.image_fetch import find_images_for_target
                 return await find_images_for_target(subject, why or subject, out)
@@ -708,12 +858,21 @@ NOTE: Slide animations are not enabled — never set Type to 'animation'.
             except Exception as e:
                 return {"found": False, "reason": f"image search error: {str(e)[:120]}"}
             if r and r.get("success"):
+                # src_url (the exact file taken) + any EXIF rights metadata ride along into
+                # slide_plan.found_images → course_modules.slide_plan, so an image's origin is
+                # traceable after the fact (takedown/audit) and CMI is preserved, not destroyed.
                 _cache_put({"path": r.get("path", ""), "caption": r.get("caption", ""),
-                            "attribution": r.get("attribution", ""), "source": r.get("source_page", "")})
+                            "attribution": r.get("attribution", ""), "source": r.get("source_page", ""),
+                            "src_url": r.get("src_url", ""),
+                            "exif_artist": r.get("exif_artist", ""),
+                            "exif_copyright": r.get("exif_copyright", "")})
                 img_id = f"img_{len(_found_images) + 1:02d}"
                 _found_images.append({
                     "id": img_id, "path": r.get("path", ""), "caption": r.get("caption", ""),
                     "attribution": r.get("attribution", ""), "source": r.get("source_page", ""),
+                    "src_url": r.get("src_url", ""),
+                    "exif_artist": r.get("exif_artist", ""),
+                    "exif_copyright": r.get("exif_copyright", ""),
                     "subject": subject,
                 })
                 print(f"[SlidePlannerAgent] find_image OK: {subject!r} -> {img_id}", flush=True)
@@ -739,7 +898,11 @@ NOTE: Slide animations are not enabled — never set Type to 'animation'.
                     "downloads, and verifies it. Returns {found, image_id, caption} on success "
                     "(caption = what the image ACTUALLY shows; write the slide to match it and "
                     "put '**Image ID:** <image_id>' on the slide) or {found:false, reason} if "
-                    "nothing suitable exists (then design a diagram). Use selectively."
+                    "nothing suitable exists (then design a diagram). Use selectively. "
+                    "BATCH your requests: once you know the images this module needs, request "
+                    "SEVERAL find_image calls in the SAME turn — they execute in parallel, so "
+                    "3 batched calls take the time of 1. One-at-a-time serial calls are the "
+                    "slowest possible way to use this tool."
                 ),
                 "input_schema": {
                     "type": "object",
@@ -834,48 +997,83 @@ NOTE: Slide animations are not enabled — never set Type to 'animation'.
                     flush=True,
                 )
 
-        # Enforce the in-slide question cap: one corrective retry if the plan
-        # exceeds max_questions (matters most for max_questions=0 → none).
+        # Enforce the EXACT in-slide question count AND the (paid) animation count in ONE combined
+        # corrective retry. Both are exact targets, not ceilings. It must be a single retry, not one
+        # per dimension: each retry regenerates the WHOLE plan from the original messages, so fixing
+        # one count in its own pass would silently clobber the other.
         def _count_questions(text: str) -> int:
-            # Anchored to the Layout marker (won't match prose), but tolerant of
-            # the colon, an em/en-dash separator, backticks, and spacing.
+            # Anchored to the Layout marker (won't match prose), but tolerant of the colon, an
+            # em/en-dash separator, backticks, and spacing.
             return len(re.findall(r"\*\*Layout:?\*\*\s*[—–-]?\s*`?\s*question_slide", text, re.IGNORECASE))
+        def _count_animations(text: str) -> int:
+            return len(re.findall(r"\*\*Type:\*\*\s*`?\s*animation\b", text, re.IGNORECASE))
+
         q_count = _count_questions(md)
-        if q_count > max_questions and isinstance(msgs, list):
+        a_count = _count_animations(md) if slide_animations else 0
+        q_off = q_count != max_questions
+        a_off = slide_animations and a_count != animation_budget
+        if (q_off or a_off) and isinstance(msgs, list):
+            fixes = []
+            if q_off:
+                if max_questions == 0:
+                    fixes.append("Remove ALL question_slide slides — this deck must have none.")
+                elif q_count > max_questions:
+                    fixes.append(f"You have {q_count} question_slide slides; remove "
+                                 f"{q_count - max_questions} so EXACTLY {max_questions} remain.")
+                else:
+                    fixes.append(f"You have {q_count} question_slide slides; add {max_questions - q_count} "
+                                 f"more so EXACTLY {max_questions} are present, placed where they best "
+                                 f"check understanding.")
+            if a_off:
+                if a_count > animation_budget:
+                    fixes.append(f"You have {a_count} slides with **Type:** animation; convert "
+                                 f"{a_count - animation_budget} back to static so EXACTLY "
+                                 f"{animation_budget} remain.")
+                else:
+                    fixes.append(f"You have {a_count} slides with **Type:** animation; mark "
+                                 f"{animation_budget - a_count} more of the most motion-worthy content "
+                                 f"slides (add content slides if the module needs room) so EXACTLY "
+                                 f"{animation_budget} do — no fewer. Give each a concrete **Animation:** "
+                                 f"note and narration speaker notes.")
             print(
-                f"[SlidePlannerAgent] plan has {q_count} question slide(s) — over "
-                f"the cap of {max_questions}, requesting correction",
+                f"[SlidePlannerAgent] count off (questions {q_count}/{max_questions}"
+                + (f", animations {a_count}/{animation_budget}" if slide_animations else "")
+                + ") — requesting correction",
                 flush=True,
             )
-            limit_txt = ("Remove ALL question_slide slides — this deck must have none."
-                         if max_questions == 0 else
-                         f"Keep at most {max_questions} question_slide slide(s); convert or remove the rest.")
-            qfix = (
-                f"Your plan has {q_count} question_slide slides, which exceeds the limit. "
-                f"{limit_txt} Output the COMPLETE corrected plan in the same format. "
-                f"Do not do any new web research."
+            fix_msg = (
+                "Your plan has the wrong number of some slide types. Correct it EXACTLY:\n- "
+                + "\n- ".join(fixes)
+                + "\nOutput the COMPLETE corrected plan in the same format. Do not do any new web research."
             )
             try:
-                qtext, _ = self.run_tool_loop(
-                    messages=msgs + [{"role": "user", "content": qfix}],
+                ctext, _ = self.run_tool_loop(
+                    messages=msgs + [{"role": "user", "content": fix_msg}],
                     tools=tools,
                     tool_handlers={},
                     max_tokens=128000,
-                    trace_label=f"SlidePlanner.module{mod_pos}.qfix",
+                    trace_label=f"SlidePlanner.module{mod_pos}.countfix",
                 )
-                qmd = (qtext or "").strip()
-                if qmd.startswith("```") and qmd.endswith("```"):
-                    qmd = qmd.split("\n", 1)[1] if "\n" in qmd else qmd
-                    qmd = qmd.rsplit("```", 1)[0].rstrip()
-                if len(qmd) >= 100 and _count_questions(qmd) <= q_count:
-                    md = qmd
+                cmd = (ctext or "").strip()
+                if cmd.startswith("```") and cmd.endswith("```"):
+                    cmd = cmd.split("\n", 1)[1] if "\n" in cmd else cmd
+                    cmd = cmd.rsplit("```", 1)[0].rstrip()
+                # Accept only if the correction is at least as close on BOTH counts (never worse).
+                q_ok = abs(_count_questions(cmd) - max_questions) <= abs(q_count - max_questions)
+                a_ok = (not slide_animations) or \
+                    abs(_count_animations(cmd) - animation_budget) <= abs(a_count - animation_budget)
+                if len(cmd) >= 100 and q_ok and a_ok:
+                    md = cmd
             except Exception as e:
-                print(f"[SlidePlannerAgent] question-cap correction failed ({e}) — keeping plan", flush=True)
-            final_q = _count_questions(md)
-            if final_q > max_questions:
+                print(f"[SlidePlannerAgent] count correction failed ({e}) — keeping plan", flush=True)
+            fq = _count_questions(md)
+            fa = _count_animations(md) if slide_animations else 0
+            if fq != max_questions or (slide_animations and fa != animation_budget):
                 print(
-                    f"[SlidePlannerAgent] ⚠ plan still has {final_q} question slide(s) "
-                    f"(cap {max_questions}) — proceeding anyway",
+                    f"[SlidePlannerAgent] ⚠ counts still off after correction "
+                    f"(questions {fq}/{max_questions}"
+                    + (f", animations {fa}/{animation_budget}" if slide_animations else "")
+                    + ") — proceeding anyway",
                     flush=True,
                 )
 
@@ -902,6 +1100,95 @@ NOTE: Slide animations are not enabled — never set Type to 'animation'.
             "_iterations": iterations,
             "_latency_seconds": round(latency, 1),
         }
+
+    def allocate_animations(self, modules: list[dict], total: int, caps: dict) -> dict:
+        """Distribute EXACTLY `total` Manim slide animations across a course's modules.
+
+        This is purely about PEDAGOGICAL FIT, not cost: the creator chose the total and we
+        generate exactly that many — the allocator only decides WHERE they land. Motion teaches
+        best on math, processes, and geometric/graphical intuition, so those modules get more
+        and a history/discussion module may get none — but the sum is always the exact total.
+        Returns {position: count}, each count in [0, caps[position]], summing to
+        min(total, sum(caps)). One LLM call decides placement; sum/cap are then reconciled
+        deterministically so the exact-total contract always holds. Falls back to a
+        largest-cap-first fill on any LLM error.
+
+        `caps` maps module position → that module's physical animation ceiling
+        (slides − 2·questions − 2). `modules` are briefs: {position, title, summary}.
+        """
+        caps = {int(k): max(0, int(v)) for k, v in (caps or {}).items()}
+        capacity = sum(caps.values())
+        target = max(0, min(int(total or 0), capacity))
+        if target <= 0 or capacity <= 0:
+            return {p: 0 for p in caps}
+        if target >= capacity:
+            return dict(caps)                       # everything the course can hold
+
+        def _reconcile(alloc: dict) -> dict:
+            alloc = {p: min(max(0, alloc.get(p, 0)), caps[p]) for p in caps}
+            cur = sum(alloc.values())
+            # top up modules with the most unused room first
+            while cur < target:
+                p = max(caps, key=lambda x: (caps[x] - alloc[x], -x))
+                if caps[p] - alloc[p] <= 0:
+                    break
+                alloc[p] += 1
+                cur += 1
+            # trim from the most-loaded modules first
+            while cur > target:
+                p = max(alloc, key=lambda x: (alloc[x], -x))
+                if alloc[p] <= 0:
+                    break
+                alloc[p] -= 1
+                cur -= 1
+            return alloc
+
+        def _fallback() -> dict:
+            alloc = {p: 0 for p in caps}
+            return _reconcile(alloc)                # empty → top-up fills largest caps first
+
+        brief = "\n".join(
+            f'- position {m.get("position")}: "{m.get("title", "")}" — '
+            f'{((m.get("summary") or "")[:200])} '
+            f'(max {caps.get(int(m.get("position", -1)), 0)})'
+            for m in modules
+        )
+        prompt = (
+            f"A course has these modules. Distribute EXACTLY {target} Manim slide "
+            f"animations across them.\n\n{brief}\n\n"
+            "Manim animations teach MOTION and MATH: put them where an animated visual "
+            "genuinely helps — equations building up, algorithms/processes stepping through, "
+            "geometric or graphical intuition, transforms. Modules that are conceptual, "
+            "historical, or discussion-heavy should get few or none. CONCENTRATE them; it is "
+            "good for some modules to get 0.\n\n"
+            "Rules:\n"
+            f"- The counts MUST sum to EXACTLY {target}.\n"
+            "- Each module's count MUST be between 0 and its stated max.\n\n"
+            'Return ONLY JSON mapping every module position to its count: '
+            '{"1": 3, "2": 0, ...}'
+        )
+        try:
+            msg = self.call(
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=1024,
+                # The class enables adaptive thinking for planning, but this is a tiny JSON
+                # allocation at a tight 1024-token budget — keep thinking OFF so it can't truncate.
+                disable_thinking=True,
+            )
+            data = extract_json(text_from_response(msg)) or {}
+            alloc = {
+                int(k): max(0, int(v))
+                for k, v in data.items()
+                if str(k).lstrip("-").isdigit()
+            }
+        except Exception as e:
+            print(f"[SlidePlannerAgent] allocate_animations failed "
+                  f"({type(e).__name__}: {e}); using fallback", flush=True)
+            return _fallback()
+        result = _reconcile(alloc)
+        print(f"[SlidePlannerAgent] animation allocation (total={target}): "
+              f"{ {p: c for p, c in sorted(result.items()) if c} }", flush=True)
+        return result
 
     @staticmethod
     def _extract_image_urls(md: str) -> list[dict]:
@@ -974,7 +1261,9 @@ NOTE: Slide animations are not enabled — never set Type to 'animation'.
                     # The static build is just a title/poster; the animation is overlaid later.
                     intent = (f'Planned slide title: "{title}". This is an ANIMATION slide — the '
                               "static build is a clean title/poster and the motion is added "
-                              "separately, so do NOT apply the visual-accuracy check to it.")
+                              "separately, so do NOT apply the visual-accuracy check to it. It is "
+                              "INTENTIONALLY bare (the builder is forbidden to add content): never "
+                              "flag it as empty_slide or sparse — that is its correct final state.")
                 else:
                     dmatch = re.search(
                         r'\*\*Detailed description:\*\*\s*(.+?)(?:\n\s*-\s*\*\*|\n\n|\Z)', section, re.S
